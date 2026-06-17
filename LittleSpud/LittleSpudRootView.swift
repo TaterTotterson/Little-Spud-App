@@ -1,4 +1,5 @@
 import AVKit
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -799,6 +800,10 @@ private struct ThinkingBubbleContent: View {
 private struct Composer: View {
     @EnvironmentObject private var model: LittleSpudViewModel
     var focused: FocusState<Bool>.Binding
+    @State private var showAttachmentOptions = false
+    @State private var showPhotoLibrary = false
+    @State private var showCamera = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -806,7 +811,24 @@ private struct Composer: View {
                 StatusLine(text: model.speechStatus, kind: model.speechStatus == "No speech recognized." ? "" : "ok")
                     .padding(.horizontal, 4)
             }
+            if !model.pendingAttachments.isEmpty {
+                PendingAttachmentStrip(attachments: model.pendingAttachments) { id in
+                    model.removePendingAttachment(id: id)
+                }
+            }
             HStack(alignment: .bottom, spacing: 10) {
+                Button {
+                    focused.wrappedValue = false
+                    showAttachmentOptions = true
+                } label: {
+                    Image(systemName: model.pendingAttachments.isEmpty ? "plus" : "photo.on.rectangle.angled")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(SecondaryIconButtonStyle(active: !model.pendingAttachments.isEmpty))
+                .disabled(model.session == nil)
+                .accessibilityLabel("Attach image")
+
                 TextField("Message your Spud Hub", text: $model.draft, axis: .vertical)
                     .focused(focused)
                     .lineLimit(1...5)
@@ -844,10 +866,173 @@ private struct Composer: View {
                 .disabled(!model.canSend)
             }
         }
+        .confirmationDialog("Attach image", isPresented: $showAttachmentOptions, titleVisibility: .visible) {
+            Button("Choose Photo") {
+                showPhotoLibrary = true
+            }
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button("Take Photo") {
+                    showCamera = true
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .photosPicker(isPresented: $showPhotoLibrary, selection: $selectedPhotoItem, matching: .images)
+        .onChange(of: selectedPhotoItem) { item in
+            loadSelectedPhoto(item)
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraCaptureSheet { image in
+                if let image {
+                    model.addImageAttachment(image, suggestedName: "little-spud-camera.jpg")
+                }
+                showCamera = false
+            }
+            .ignoresSafeArea()
+        }
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 10)
         .background(AppTheme.background)
+    }
+
+    private func loadSelectedPhoto(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task {
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self), let image = UIImage(data: data) else {
+                    await MainActor.run {
+                        model.speechStatus = "Image could not be attached."
+                        selectedPhotoItem = nil
+                    }
+                    return
+                }
+                await MainActor.run {
+                    model.addImageAttachment(image, suggestedName: "little-spud-photo.jpg")
+                    selectedPhotoItem = nil
+                }
+            } catch {
+                await MainActor.run {
+                    model.speechStatus = "Image could not be attached."
+                    selectedPhotoItem = nil
+                }
+            }
+        }
+    }
+}
+
+private struct PendingAttachmentStrip: View {
+    let attachments: [LittleSpudAttachment]
+    let onRemove: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { attachment in
+                    PendingAttachmentChip(attachment: attachment) {
+                        onRemove(attachment.id)
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+    }
+}
+
+private struct PendingAttachmentChip: View {
+    let attachment: LittleSpudAttachment
+    let onRemove: () -> Void
+
+    private var image: UIImage? {
+        guard attachment.dataUrl.hasPrefix("data:"), let comma = attachment.dataUrl.firstIndex(of: ",") else { return nil }
+        let payload = String(attachment.dataUrl[attachment.dataUrl.index(after: comma)...])
+        guard let data = Data(base64Encoded: payload) else { return nil }
+        return UIImage(data: data)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(AppTheme.accent2)
+                }
+            }
+            .frame(width: 42, height: 42)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(attachment.displayName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text(formattedSize)
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.muted)
+            }
+            .frame(maxWidth: 150, alignment: .leading)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .foregroundStyle(AppTheme.text)
+            .background(Color.white.opacity(0.08), in: Circle())
+            .accessibilityLabel("Remove attachment")
+        }
+        .padding(6)
+        .background(AppTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.line, lineWidth: 1)
+        )
+    }
+
+    private var formattedSize: String {
+        if attachment.size < 1024 { return "\(attachment.size) B" }
+        let kb = Double(attachment.size) / 1024
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        return String(format: "%.1f MB", kb / 1024)
+    }
+}
+
+private struct CameraCaptureSheet: UIViewControllerRepresentable {
+    let onComplete: (UIImage?) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let onComplete: (UIImage?) -> Void
+
+        init(onComplete: @escaping (UIImage?) -> Void) {
+            self.onComplete = onComplete
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onComplete(nil)
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            onComplete(info[.originalImage] as? UIImage)
+        }
     }
 }
 

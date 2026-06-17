@@ -64,7 +64,7 @@ struct SpudLinkToolNotice {
 }
 
 final class SpudLinkAPI {
-    private let clientVersion = "0.1.34"
+    private let clientVersion = "1.0.0"
     private let urlSession: URLSession
 
     init(urlSession: URLSession = .shared) {
@@ -243,6 +243,7 @@ final class SpudLinkAPI {
         session: LittleSpudSession,
         messages: [LittleSpudMessage],
         text: String,
+        attachments: [LittleSpudAttachment],
         onToolNotice: @escaping (SpudLinkToolNotice) -> Void
     ) async throws -> SpudLinkChatResponse {
         var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/tater/chat")
@@ -253,16 +254,22 @@ final class SpudLinkAPI {
             .filter { $0.kind != "tool_notice" }
             .suffix(14)
             .map { ["role": $0.role.rawValue, "content": $0.content] }
+        let messageContent = buildMessageContent(text: text, attachments: attachments)
+        let attachmentMetadata = attachments.map {
+            [
+                "name": $0.displayName,
+                "type": $0.type,
+                "size": $0.size
+            ] as [String: Any]
+        }
 
         request.httpBody = try jsonData([
             "user": session.userName,
             "user_name": session.userName,
             "device_name": session.deviceName,
-            "message": [
-                ["type": "text", "text": text]
-            ],
+            "message": messageContent,
             "history": Array(history),
-            "attachments": [],
+            "attachments": attachmentMetadata,
             "metadata": [
                 "client": "little-spud-ios",
                 "client_version": clientVersion,
@@ -388,6 +395,36 @@ final class SpudLinkAPI {
             _ = try handleBlock(block)
         }
         return SpudLinkChatResponse(content: content, reopenMic: reopenMic, attachments: dedupeAttachments(attachments))
+    }
+
+    private func buildMessageContent(text: String, attachments: [LittleSpudAttachment]) -> [[String: Any]] {
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promptText = cleanText.isEmpty ? "Please review the attached media." : cleanText
+        var content: [[String: Any]] = [
+            ["type": "text", "text": "\(promptText)\(attachmentSummary(attachments))"]
+        ]
+        for item in attachments where !item.dataUrl.isEmpty {
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": item.dataUrl]
+            ])
+        }
+        return content
+    }
+
+    private func attachmentSummary(_ attachments: [LittleSpudAttachment]) -> String {
+        guard !attachments.isEmpty else { return "" }
+        let lines = attachments.enumerated().map { index, item in
+            "\(index + 1). \(item.displayName) (\(item.type), \(formatBytes(item.size)), included as image_url)"
+        }
+        return "\n\nAttached media:\n\(lines.joined(separator: "\n"))"
+    }
+
+    private func formatBytes(_ size: Int) -> String {
+        guard size >= 1024 else { return "\(size) B" }
+        let kb = Double(size) / 1024
+        guard kb >= 1024 else { return String(format: "%.1f KB", kb) }
+        return String(format: "%.1f MB", kb / 1024)
     }
 
     func parsePairingInput(rawInput: String, hubUrlInput: String) throws -> PairingInput {

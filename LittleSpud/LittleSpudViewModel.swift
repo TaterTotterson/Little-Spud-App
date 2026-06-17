@@ -26,6 +26,7 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var isVoiceSubmitting = false
     @Published var speechStatus = ""
     @Published var hubConnected = false
+    @Published var pendingAttachments: [LittleSpudAttachment] = []
 
     var connectionRoute: LittleSpudConnectionRoute {
         session?.displayRoute ?? .unknown
@@ -51,7 +52,7 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     var canSend: Bool {
-        session != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        session != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty)
     }
 
     var canUseVoiceInput: Bool {
@@ -235,17 +236,37 @@ final class LittleSpudViewModel: ObservableObject {
         UserDefaults.standard.set(userName, forKey: "little-spud-ios:user-name")
     }
 
+    func addImageAttachment(_ image: UIImage, suggestedName: String = "") {
+        guard pendingAttachments.count < 4 else {
+            speechStatus = "Remove an image before attaching another."
+            return
+        }
+        guard let attachment = makeImageAttachment(from: image, suggestedName: suggestedName) else {
+            speechStatus = "Image could not be attached."
+            return
+        }
+        pendingAttachments.append(attachment)
+        speechStatus = "Image attached."
+    }
+
+    func removePendingAttachment(id: String) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
     func sendMessage(fromVoice: Bool = false) {
         guard let currentSession = session, canSend else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outgoingAttachments = pendingAttachments
         let priorMessages = messages
         let assistantId = UUID().uuidString
+        let userContent = text.isEmpty ? (outgoingAttachments.count == 1 ? "Attached image" : "Attached images") : text
         let userMessage = LittleSpudMessage(
             id: UUID().uuidString,
             role: .user,
-            content: text,
+            content: userContent,
             createdAt: Date(),
-            kind: nil
+            kind: nil,
+            attachments: outgoingAttachments
         )
         messages.append(userMessage)
         messages.append(LittleSpudMessage(
@@ -256,6 +277,7 @@ final class LittleSpudViewModel: ObservableObject {
             kind: "pending"
         ))
         draft = ""
+        pendingAttachments = []
         beginChatRun()
         saveMessages()
 
@@ -266,7 +288,7 @@ final class LittleSpudViewModel: ObservableObject {
                     self.finishChatRun()
                     self.saveMessages()
                 }
-                await self.sendDemoResponse(for: text, assistantId: assistantId, fromVoice: fromVoice)
+                await self.sendDemoResponse(for: text, attachments: outgoingAttachments, assistantId: assistantId, fromVoice: fromVoice)
             }
             return
         }
@@ -284,7 +306,7 @@ final class LittleSpudViewModel: ObservableObject {
                 hubConnected = true
                 saveSession()
 
-                let response = try await api.sendChat(session: chatSession, messages: priorMessages, text: text) { notice in
+                let response = try await api.sendChat(session: chatSession, messages: priorMessages, text: text, attachments: outgoingAttachments) { notice in
                     Task { @MainActor [weak self] in
                         self?.appendToolNotice(notice, beforeAssistantId: assistantId)
                     }
@@ -330,7 +352,7 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
-    private func sendDemoResponse(for text: String, assistantId: String, fromVoice: Bool) async {
+    private func sendDemoResponse(for text: String, attachments: [LittleSpudAttachment], assistantId: String, fromVoice: Bool) async {
         hubConnected = true
         try? await Task.sleep(nanoseconds: 520_000_000)
         appendToolNotice(
@@ -338,14 +360,14 @@ final class LittleSpudViewModel: ObservableObject {
                 "run_id": "demo-\(assistantId)",
                 "display_name": "Demo Tater",
                 "phase": "tool_start",
-                "text": demoToolText(for: text),
+                "text": demoToolText(for: text, attachments: attachments),
                 "created_at": Date().timeIntervalSince1970
             ]),
             beforeAssistantId: assistantId
         )
         try? await Task.sleep(nanoseconds: 620_000_000)
 
-        let response = demoChatResponse(for: text)
+        let response = demoChatResponse(for: text, attachments: attachments)
         if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
             messages[messageIndex].content = ""
             messages[messageIndex].kind = nil
@@ -369,7 +391,10 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
-    private func demoToolText(for text: String) -> String {
+    private func demoToolText(for text: String, attachments: [LittleSpudAttachment]) -> String {
+        if !attachments.isEmpty {
+            return "Looking over the attached image..."
+        }
         let lower = text.lowercased()
         if lower.contains("image") || lower.contains("photo") || lower.contains("media") {
             return "Drawing a small demo image for you..."
@@ -380,12 +405,14 @@ final class LittleSpudViewModel: ObservableObject {
         return "Checking the demo Tater shelf..."
     }
 
-    private func demoChatResponse(for text: String) -> SpudLinkChatResponse {
+    private func demoChatResponse(for text: String, attachments inputAttachments: [LittleSpudAttachment]) -> SpudLinkChatResponse {
         let lower = text.lowercased()
         var content = "Tater preview is awake. This local preview shows how Little Spud feels before you pair it with your own Tater. Set up Tater at https://taterassistant.com."
         var attachments: [LittleSpudAttachment] = []
 
-        if lower.contains("image") || lower.contains("photo") || lower.contains("media") || lower.contains("show") {
+        if !inputAttachments.isEmpty {
+            content = "I received the attached image. Once paired with your own Tater, Hydra can pass it to vision tools when you ask about it."
+        } else if lower.contains("image") || lower.contains("photo") || lower.contains("media") || lower.contains("show") {
             content = "Here is a local sample image attachment. Once you pair Little Spud, images, audio, and video can come from your own Tater. Setup info is at https://taterassistant.com."
             attachments.append(LittleSpudAttachment(
                 id: "demo-image-\(UUID().uuidString)",
@@ -402,6 +429,44 @@ final class LittleSpudViewModel: ObservableObject {
         }
 
         return SpudLinkChatResponse(content: content, reopenMic: false, attachments: attachments)
+    }
+
+    private func makeImageAttachment(from image: UIImage, suggestedName: String) -> LittleSpudAttachment? {
+        let normalized = resizedImage(image, maxDimension: 1600)
+        guard let data = normalized.jpegData(compressionQuality: 0.78), !data.isEmpty else { return nil }
+        let cleanName = suggestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = cleanName.isEmpty ? "little-spud-photo-\(Int(Date().timeIntervalSince1970)).jpg" : cleanName
+        let dataUrl = "data:image/jpeg;base64,\(data.base64EncodedString())"
+        return LittleSpudAttachment(
+            id: UUID().uuidString,
+            name: name,
+            type: "image/jpeg",
+            size: data.count,
+            previewUrl: "",
+            dataUrl: dataUrl
+        )
+    }
+
+    private func resizedImage(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        let size = image.size
+        let largest = max(size.width, size.height)
+        guard largest > maxDimension, largest > 0 else {
+            return normalizedImage(image)
+        }
+        let scale = maxDimension / largest
+        let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+
+    private func normalizedImage(_ image: UIImage) -> UIImage {
+        guard image.imageOrientation != .up else { return image }
+        let renderer = UIGraphicsImageRenderer(size: image.size)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+        }
     }
 
     private func demoImageDataURL() -> String {
