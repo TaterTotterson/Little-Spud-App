@@ -494,7 +494,15 @@ final class LittleSpudViewModel: ObservableObject {
         startVoiceInput()
     }
 
-    func enableNotifications() {
+    func toggleNotifications() {
+        if notificationsEnabled {
+            notificationsEnabled = false
+            UserDefaults.standard.set(false, forKey: notificationsKey)
+            statusText = "Device notifications paused."
+            statusKind = ""
+            return
+        }
+
         Task { [weak self] in
             guard let self else { return }
             let granted = await LocalNotificationManager.shared.requestAuthorization()

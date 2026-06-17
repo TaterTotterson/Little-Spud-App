@@ -127,7 +127,7 @@ private struct ChatHeader: View {
             HeaderStatus()
             Spacer(minLength: 8)
             Button {
-                model.enableNotifications()
+                model.toggleNotifications()
             } label: {
                 Image(systemName: model.notificationsEnabled ? "bell.fill" : "bell")
                     .frame(width: 36, height: 36)
