@@ -195,8 +195,8 @@ final class LittleSpudViewModel: ObservableObject {
     func startDemoMode() {
         let typedUser = userName.trimmingCharacters(in: .whitespacesAndNewlines)
         let typedDevice = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanUser = typedUser.isEmpty ? "Apple Reviewer" : typedUser
-        let cleanDevice = typedDevice.isEmpty ? "Demo iPhone" : typedDevice
+        let cleanUser = typedUser.isEmpty ? "Little Spud User" : typedUser
+        let cleanDevice = typedDevice.isEmpty ? "Preview iPhone" : typedDevice
         let now = Date()
         pauseForegroundWork()
         session = LittleSpudSession(
@@ -208,8 +208,8 @@ final class LittleSpudViewModel: ObservableObject {
             userName: cleanUser,
             deviceName: cleanDevice,
             nodeName: "\(cleanUser) on \(cleanDevice)",
-            hubName: "Tater Demo",
-            hubMode: "Review Demo",
+            hubName: "Tater Preview",
+            hubMode: "Local Preview",
             toolsEnabled: true,
             pairedAt: now,
             lastSeenAt: now
@@ -219,13 +219,13 @@ final class LittleSpudViewModel: ObservableObject {
         hubUrl = demoHubUrl
         syncCode = ""
         hubConnected = true
-        statusText = "Demo mode is ready."
+        statusText = "Little Spud preview is ready."
         statusKind = "ok"
         messages = [
             LittleSpudMessage(
                 id: "demo-welcome",
                 role: .assistant,
-                content: "Demo mode is ready. Ask for a sample image, a notification, or a quick Tater reply.",
+                content: "Little Spud preview is ready. Ask for a sample image, a notification, or a quick Tater reply. Set up your own Tater at https://taterassistant.com.",
                 createdAt: now,
                 kind: nil
             )
@@ -357,8 +357,8 @@ final class LittleSpudViewModel: ObservableObject {
         if text.localizedCaseInsensitiveContains("notification") {
             appendHubNotification(HubNotification(
                 id: "demo-notification-\(UUID().uuidString)",
-                title: "Little Spud Demo",
-                message: "This is a local device notification from the offline demo.",
+                title: "Little Spud Preview",
+                message: "This is a local preview notification. Set up your own Tater at taterassistant.com.",
                 createdAt: Date(),
                 priority: "normal"
             ))
@@ -382,11 +382,11 @@ final class LittleSpudViewModel: ObservableObject {
 
     private func demoChatResponse(for text: String) -> SpudLinkChatResponse {
         let lower = text.lowercased()
-        var content = "Demo Tater is awake. This reply is generated entirely on-device so App Review can test Little Spud without connecting to a private Tater."
+        var content = "Tater preview is awake. This local preview shows how Little Spud feels before you pair it with your own Tater. Set up Tater at https://taterassistant.com."
         var attachments: [LittleSpudAttachment] = []
 
         if lower.contains("image") || lower.contains("photo") || lower.contains("media") || lower.contains("show") {
-            content = "Here is a local sample image attachment. In normal use, images, audio, and video come from your paired Tater instance."
+            content = "Here is a local sample image attachment. Once you pair Little Spud, images, audio, and video can come from your own Tater. Setup info is at https://taterassistant.com."
             attachments.append(LittleSpudAttachment(
                 id: "demo-image-\(UUID().uuidString)",
                 name: "little-spud-demo.png",
@@ -396,9 +396,9 @@ final class LittleSpudViewModel: ObservableObject {
                 dataUrl: demoImageDataURL()
             ))
         } else if lower.contains("notification") {
-            content = "I queued a local demo notification. Real Little Spud notifications are pulled from your private Tater queue when the app is awake or resumes."
+            content = "I queued a local preview notification. With your own Tater, Little Spud pulls notifications from your private Tater queue when the app is awake or resumes."
         } else if lower.contains("voice") || lower.contains("mic") {
-            content = "Voice mode is available in the real paired app through your Tater speech endpoint. This demo keeps the review flow local and private."
+            content = "Voice mode connects to your paired Tater speech endpoint. This preview keeps everything local until you set up your own Tater at https://taterassistant.com."
         }
 
         return SpudLinkChatResponse(content: content, reopenMic: false, attachments: attachments)
@@ -447,8 +447,8 @@ final class LittleSpudViewModel: ObservableObject {
                 .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
                 .foregroundColor: UIColor(red: 1.0, green: 0.66, blue: 0.25, alpha: 1)
             ]
-            NSString(string: "Little Spud Demo").draw(in: CGRect(x: 0, y: 226, width: size.width, height: 42), withAttributes: centered(titleAttrs))
-            NSString(string: "Local review mode").draw(in: CGRect(x: 0, y: 266, width: size.width, height: 28), withAttributes: centered(subtitleAttrs))
+            NSString(string: "Little Spud Preview").draw(in: CGRect(x: 0, y: 226, width: size.width, height: 42), withAttributes: centered(titleAttrs))
+            NSString(string: "Set up Tater at taterassistant.com").draw(in: CGRect(x: 0, y: 266, width: size.width, height: 28), withAttributes: centered(subtitleAttrs))
         }
         return "data:image/png;base64,\(data.base64EncodedString())"
     }
