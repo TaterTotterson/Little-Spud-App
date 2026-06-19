@@ -1,8 +1,17 @@
+<div align="center">
+  <a href="https://taterassistant.com">
+    <img src="assets/littlespud.png" alt="Tater Little Spud App" width="720"/>
+  </a>
+</div>
+<h3 align="center">
+  <a href="https://taterassistant.com">taterassistant.com</a>
+</h3>
+
 # Little Spud iOS
 
-This is the native iOS app for Little Spud. It uses SwiftUI for pairing, chat, local notification polling, QR scanning, reply haptics, and the same SpudLink API used by the browser and macOS Little Spud apps.
+This is the native iOS app for Little Spud. It uses SwiftUI for pairing, chat, QR scanning, reply haptics, device notifications, and the same SpudLink API used by the browser and macOS Little Spud apps.
 
-The app does not use APNs. Notifications are local iOS notifications triggered by the native poller while the app is running or active enough to poll the paired Tater Hub. Missed notifications stay queued in Tater and are picked up when the app resumes.
+Device notifications use Firebase Cloud Messaging and Apple Push Notification service to wake the app with a generic Little Spud alert. The real notification content stays in the paired Tater instance and is fetched by the app or notification service extension when possible.
 
 ## Build
 
@@ -24,5 +33,5 @@ scripts/build_app.sh
 - SpudLink pairing by QR payload or manual code.
 - Tater chat over `/api/spudlink/v1/tater/chat`.
 - History sync and queued Little Spud notification polling.
-- Local iOS notifications without APNs.
+- Device notifications through Firebase/APNs with Tater-side content resolution.
 - Reply reveal ticks and completion haptics.
