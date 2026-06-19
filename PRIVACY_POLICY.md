@@ -18,6 +18,12 @@ When you pair Little Spud with Tater, the app sends messages directly to the Tat
 
 This data is sent to your configured Tater instance, not to a Little Spud cloud service.
 
+## Push Notifications
+
+If you enable device notifications, Little Spud may register a Firebase Cloud Messaging push token with the Little Spud push gateway so iOS can receive notifications while the app is closed. The paired Tater stores only an opaque push device id and secret returned by the gateway.
+
+Push notifications use a generic wake-up message such as "New Little Spud notification." Notification contents, chat messages, tool results, and media are not sent through Firebase by Little Spud in this mode. The app fetches the real notification details directly from your configured Tater when it opens or syncs.
+
 ## Permissions
 
 Little Spud may ask for:
@@ -25,7 +31,7 @@ Little Spud may ask for:
 - Camera access to scan Tater pairing QR codes.
 - Microphone access for voice input.
 - Local network access to connect to your Tater instance on your private network.
-- Notification permission to show local device notifications.
+- Notification permission to show local and remote device notifications.
 - Photo library access if you choose to attach media.
 
 You can manage these permissions in iOS Settings.

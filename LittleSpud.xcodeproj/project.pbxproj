@@ -19,7 +19,38 @@
 		1A000001000000000000000B /* LittleSpudViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000001D /* LittleSpudViewModel.swift */; };
 		1A000001000000000000000C /* LittleSpudRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000001E /* LittleSpudRootView.swift */; };
 		1A000001000000000000000D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000001F /* PrivacyInfo.xcprivacy */; };
+		1A000001000000000000000E /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000010000000000000022 /* FirebaseCore */; };
+		1A000001000000000000000F /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000010000000000000023 /* FirebaseMessaging */; };
+		1A0000010000000000000025 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000026 /* GoogleService-Info.plist */; };
+		1A0000010000000000000027 /* LittleSpudShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002B /* LittleSpudShared.swift */; };
+		1A0000010000000000000028 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002C /* NotificationService.swift */; };
+		1A0000010000000000000029 /* LittleSpudShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002B /* LittleSpudShared.swift */; };
+		1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002F /* LittleSpudNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		1A0000010000000000000038 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A0000010000000000000061 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A0000010000000000000042;
+			remoteInfo = LittleSpudNotificationService;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		1A0000010000000000000036 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		1A0000010000000000000011 /* LittleSpudApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LittleSpudApp.swift; sourceTree = "<group>"; };
@@ -36,10 +67,26 @@
 		1A000001000000000000001D /* LittleSpudViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LittleSpudViewModel.swift; sourceTree = "<group>"; };
 		1A000001000000000000001E /* LittleSpudRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LittleSpudRootView.swift; sourceTree = "<group>"; };
 		1A000001000000000000001F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1A0000010000000000000020 /* LittleSpud.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LittleSpud.entitlements; sourceTree = "<group>"; };
+		1A0000010000000000000026 /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
+		1A000001000000000000002B /* LittleSpudShared.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LittleSpudShared.swift; sourceTree = "<group>"; };
+		1A000001000000000000002C /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		1A000001000000000000002D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1A000001000000000000002E /* LittleSpudNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LittleSpudNotificationService.entitlements; sourceTree = "<group>"; };
+		1A000001000000000000002F /* LittleSpudNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LittleSpudNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		1A0000010000000000000021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A000001000000000000000E /* FirebaseCore in Frameworks */,
+				1A000001000000000000000F /* FirebaseMessaging in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0000010000000000000034 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -53,6 +100,7 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000032 /* LittleSpud */,
+				1A0000010000000000000037 /* LittleSpudNotificationService */,
 				1A0000010000000000000033 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -65,12 +113,15 @@
 				1A000001000000000000001D /* LittleSpudViewModel.swift */,
 				1A000001000000000000001C /* SpudLinkAPI.swift */,
 				1A0000010000000000000019 /* LittleSpudModels.swift */,
+				1A000001000000000000002B /* LittleSpudShared.swift */,
 				1A000001000000000000001A /* KeychainStore.swift */,
 				1A0000010000000000000012 /* LocalNotificationManager.swift */,
 				1A0000010000000000000018 /* HapticManager.swift */,
 				1A000001000000000000001B /* QRCodeScannerSheet.swift */,
 				1A0000010000000000000014 /* QRCodeScannerViewController.swift */,
 				1A0000010000000000000015 /* Info.plist */,
+				1A0000010000000000000026 /* GoogleService-Info.plist */,
+				1A0000010000000000000020 /* LittleSpud.entitlements */,
 				1A000001000000000000001F /* PrivacyInfo.xcprivacy */,
 				1A0000010000000000000016 /* Assets.xcassets */,
 			);
@@ -81,8 +132,19 @@
 			isa = PBXGroup;
 			children = (
 				1A0000010000000000000017 /* LittleSpud.app */,
+				1A000001000000000000002F /* LittleSpudNotificationService.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		1A0000010000000000000037 /* LittleSpudNotificationService */ = {
+			isa = PBXGroup;
+			children = (
+				1A000001000000000000002C /* NotificationService.swift */,
+				1A000001000000000000002D /* Info.plist */,
+				1A000001000000000000002E /* LittleSpudNotificationService.entitlements */,
+			);
+			path = LittleSpudNotificationService;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -95,15 +157,39 @@
 				1A0000010000000000000051 /* Sources */,
 				1A0000010000000000000021 /* Frameworks */,
 				1A0000010000000000000052 /* Resources */,
+				1A0000010000000000000036 /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A0000010000000000000039 /* PBXTargetDependency */,
+			);
+			name = LittleSpud;
+			packageProductDependencies = (
+				1A0000010000000000000022 /* FirebaseCore */,
+				1A0000010000000000000023 /* FirebaseMessaging */,
+			);
+			productName = LittleSpud;
+			productReference = 1A0000010000000000000017 /* LittleSpud.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1A0000010000000000000042 /* LittleSpudNotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A0000010000000000000082 /* Build configuration list for PBXNativeTarget "LittleSpudNotificationService" */;
+			buildPhases = (
+				1A0000010000000000000035 /* Sources */,
+				1A0000010000000000000034 /* Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
-			name = LittleSpud;
-			productName = LittleSpud;
-			productReference = 1A0000010000000000000017 /* LittleSpud.app */;
-			productType = "com.apple.product-type.application";
+			name = LittleSpudNotificationService;
+			packageProductDependencies = (
+			);
+			productName = LittleSpudNotificationService;
+			productReference = 1A000001000000000000002F /* LittleSpudNotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -117,6 +203,22 @@
 				TargetAttributes = {
 					1A0000010000000000000041 = {
 						CreatedOnToolsVersion = 16.0;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
+					};
+					1A0000010000000000000042 = {
+						CreatedOnToolsVersion = 16.0;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -129,11 +231,15 @@
 				Base,
 			);
 			mainGroup = 1A0000010000000000000031;
+			packageReferences = (
+				1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+			);
 			productRefGroup = 1A0000010000000000000033 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				1A0000010000000000000041 /* LittleSpud */,
+				1A0000010000000000000042 /* LittleSpudNotificationService */,
 			);
 		};
 /* End PBXProject section */
@@ -145,6 +251,7 @@
 			files = (
 				1A0000010000000000000005 /* Assets.xcassets in Resources */,
 				1A000001000000000000000D /* PrivacyInfo.xcprivacy in Resources */,
+				1A0000010000000000000025 /* GoogleService-Info.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -160,6 +267,7 @@
 				1A000001000000000000000B /* LittleSpudViewModel.swift in Sources */,
 				1A000001000000000000000A /* SpudLinkAPI.swift in Sources */,
 				1A0000010000000000000007 /* LittleSpudModels.swift in Sources */,
+				1A0000010000000000000027 /* LittleSpudShared.swift in Sources */,
 				1A0000010000000000000008 /* KeychainStore.swift in Sources */,
 				1A0000010000000000000002 /* LocalNotificationManager.swift in Sources */,
 				1A0000010000000000000006 /* HapticManager.swift in Sources */,
@@ -168,7 +276,48 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1A0000010000000000000035 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000010000000000000028 /* NotificationService.swift in Sources */,
+				1A0000010000000000000029 /* LittleSpudShared.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		1A0000010000000000000039 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A0000010000000000000042 /* LittleSpudNotificationService */;
+			targetProxy = 1A0000010000000000000038 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.14.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1A0000010000000000000022 /* FirebaseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCore;
+		};
+		1A0000010000000000000023 /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		1A0000010000000000000071 /* Debug */ = {
@@ -295,13 +444,16 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				APS_ENVIRONMENT = development;
+				CODE_SIGN_ENTITLEMENTS = LittleSpud/LittleSpud.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpud/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Little Spud";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios;
 				PRODUCT_NAME = LittleSpud;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -314,15 +466,62 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				APS_ENVIRONMENT = production;
+				CODE_SIGN_ENTITLEMENTS = LittleSpud/LittleSpud.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpud/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Little Spud";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios;
 				PRODUCT_NAME = LittleSpud;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		1A0000010000000000000075 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = LittleSpudNotificationService/LittleSpudNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = 8BHV7Y2D9D;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LittleSpudNotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 1.0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios.NotificationService;
+				PRODUCT_NAME = LittleSpudNotificationService;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1A0000010000000000000076 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = LittleSpudNotificationService/LittleSpudNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = 8BHV7Y2D9D;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LittleSpudNotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 1.0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios.NotificationService;
+				PRODUCT_NAME = LittleSpudNotificationService;
+				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -346,6 +545,15 @@
 			buildConfigurations = (
 				1A0000010000000000000073 /* Debug */,
 				1A0000010000000000000074 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A0000010000000000000082 /* Build configuration list for PBXNativeTarget "LittleSpudNotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000010000000000000075 /* Debug */,
+				1A0000010000000000000076 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

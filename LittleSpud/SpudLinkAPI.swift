@@ -3,11 +3,23 @@ import UIKit
 
 enum SpudLinkAPIError: LocalizedError {
     case message(String)
+    case httpStatus(action: String, statusCode: Int, detail: String)
 
     var errorDescription: String? {
         switch self {
         case .message(let value):
             return value
+        case .httpStatus(let action, _, let detail):
+            return "\(action) failed: \(detail)"
+        }
+    }
+
+    var statusCode: Int? {
+        switch self {
+        case .message:
+            return nil
+        case .httpStatus(_, let statusCode, _):
+            return statusCode
         }
     }
 }
@@ -65,6 +77,8 @@ struct SpudLinkToolNotice {
 
 final class SpudLinkAPI {
     private let clientVersion = "1.0.0"
+    private let pushGatewayRegisterURL = "https://push.taterassistant.com/little-spud/register"
+    private let pushGatewaySendURL = "https://push.taterassistant.com/little-spud/send"
     private let urlSession: URLSession
 
     init(urlSession: URLSession = .shared) {
@@ -133,6 +147,7 @@ final class SpudLinkAPI {
             nodeName: dictString(node, "name").ifEmpty("\(cleanUser) on \(cleanDevice)"),
             hubName: dictString(hub, "name").ifEmpty(sync.hubUrl),
             hubMode: dictString(hub, "mode"),
+            assistantName: dictString(hub, "assistant_name", "tater_name").ifEmpty("Tater"),
             toolsEnabled: dictBool(hub, "tools_enabled"),
             pairedAt: now,
             lastSeenAt: now
@@ -188,16 +203,34 @@ final class SpudLinkAPI {
         updated.nodeName = dictString(node, "name").ifEmpty(updated.nodeName)
         updated.hubName = dictString(hub, "name").ifEmpty(updated.hubName)
         updated.hubMode = dictString(hub, "mode").ifEmpty(updated.hubMode)
+        updated.assistantName = dictString(hub, "assistant_name", "tater_name").ifEmpty(updated.assistantName)
         updated.toolsEnabled = dictBool(hub, "tools_enabled") ?? updated.toolsEnabled
         updated.lastSeenAt = Date()
         return updated
     }
 
     func fetchHistory(session: LittleSpudSession) async throws -> [HubHistoryMessage] {
+        try await fetchHistoryState(session: session).messages
+    }
+
+    func fetchHistoryState(session: LittleSpudSession) async throws -> HubSyncState {
         let request = try authorizedRequest(session: session, path: "/api/spudlink/v1/history?limit=80")
         let payload = try await fetchDictionary(request, actionLabel: "History sync")
         let items = payload["messages"] as? [[String: Any]] ?? []
-        return items.compactMap { normalizeHistoryMessage($0, session: session) }
+        let runs: [[String: Any]]
+        if let activeRuns = payload["active_runs"] as? [[String: Any]] {
+            runs = activeRuns
+        } else if let activeRun = dict(payload["active_run"]) {
+            runs = [activeRun]
+        } else {
+            runs = []
+        }
+        let hub = dict(payload["server"]) ?? dict(payload["hub"])
+        return HubSyncState(
+            messages: items.compactMap { normalizeHistoryMessage($0, session: session) },
+            activeRuns: runs.compactMap(normalizeActiveRun),
+            assistantName: dictString(payload, "assistant_name").ifEmpty(dictString(hub, "assistant_name", "tater_name"))
+        )
     }
 
     func pollNotification(session: LittleSpudSession, waitSeconds: Int = 20) async throws -> HubNotification? {
@@ -208,6 +241,100 @@ final class SpudLinkAPI {
             return nil
         }
         return normalizeNotification(notification)
+    }
+
+    func forgetPairing(session: LittleSpudSession) async throws {
+        if session.isDemo {
+            return
+        }
+
+        var lastError: Error?
+        for candidate in routeCandidates(for: session, preferHome: true) {
+            do {
+                var candidateSession = session
+                candidateSession.hubUrl = candidate.url
+                var request = try authorizedRequest(session: candidateSession, path: "/api/spudlink/v1/forget")
+                request.httpMethod = "POST"
+                request.timeoutInterval = 8
+                _ = try await fetchDictionary(request, actionLabel: "Forget pairing")
+                return
+            } catch {
+                lastError = error
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+    }
+
+    func registerPushGateway(fcmToken: String, session: LittleSpudSession, environment: String) async throws -> LittleSpudPushRegistration {
+        let cleanToken = fcmToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanToken.isEmpty else {
+            throw SpudLinkAPIError.message("Firebase push token is missing.")
+        }
+        let deviceInfo = await currentDeviceInfo()
+        var request = URLRequest(url: try url(pushGatewayRegisterURL, label: "Push gateway URL"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try jsonData([
+            "provider": "fcm",
+            "app": "little_spud_ios",
+            "platform": "ios",
+            "environment": environment,
+            "bundle_id": "com.tatertotterson.littlespud.ios",
+            "fcm_token": cleanToken,
+            "device_name": session.deviceName,
+            "node_name": session.displayNodeName,
+            "client_version": clientVersion,
+            "system_version": deviceInfo.systemVersion,
+            "device_model": deviceInfo.model
+        ])
+
+        let payload = try await fetchDictionary(request, actionLabel: "Push gateway registration")
+        let pushDeviceId = dictString(payload, "push_device_id", "device_id")
+        let pushSecret = dictString(payload, "push_secret", "secret")
+        guard !pushDeviceId.isEmpty, !pushSecret.isEmpty else {
+            throw SpudLinkAPIError.message("Push gateway did not return registration credentials.")
+        }
+        return LittleSpudPushRegistration(
+            provider: dictString(payload, "provider").ifEmpty("fcm"),
+            app: dictString(payload, "app").ifEmpty("little_spud_ios"),
+            environment: dictString(payload, "environment").ifEmpty(environment),
+            pushDeviceId: pushDeviceId,
+            pushSecret: pushSecret,
+            gatewayUrl: dictString(payload, "gateway_url", "relay_url", "send_url").ifEmpty(pushGatewaySendURL),
+            tokenFingerprint: String(cleanToken.suffix(24)),
+            registeredAt: Date()
+        )
+    }
+
+    func updatePushRegistration(session: LittleSpudSession, registration: LittleSpudPushRegistration?, enabled: Bool) async throws -> LittleSpudSession {
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/push-registration")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        var body: [String: Any] = [
+            "enabled": enabled
+        ]
+        if enabled, let registration {
+            body.merge([
+                "provider": registration.provider,
+                "app": registration.app,
+                "environment": registration.environment,
+                "push_device_id": registration.pushDeviceId,
+                "push_secret": registration.pushSecret,
+                "gateway_url": registration.gatewayUrl,
+                "registered_at": registration.registeredAt.timeIntervalSince1970,
+                "metadata": [
+                    "client": "little-spud-ios",
+                    "client_version": clientVersion
+                ]
+            ]) { _, new in new }
+        }
+        request.httpBody = try jsonData(body)
+        let payload = try await fetchDictionary(request, actionLabel: "Push registration")
+        return updatedSession(from: payload, session: session)
     }
 
     func fetchSpeech(session: LittleSpudSession, text: String) async throws -> Data {
@@ -259,7 +386,9 @@ final class SpudLinkAPI {
             [
                 "name": $0.displayName,
                 "type": $0.type,
-                "size": $0.size
+                "mimetype": $0.type,
+                "size": $0.size,
+                "data_url": $0.dataUrl
             ] as [String: Any]
         }
 
@@ -400,22 +529,15 @@ final class SpudLinkAPI {
     private func buildMessageContent(text: String, attachments: [LittleSpudAttachment]) -> [[String: Any]] {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptText = cleanText.isEmpty ? "Please review the attached media." : cleanText
-        var content: [[String: Any]] = [
+        return [
             ["type": "text", "text": "\(promptText)\(attachmentSummary(attachments))"]
         ]
-        for item in attachments where !item.dataUrl.isEmpty {
-            content.append([
-                "type": "image_url",
-                "image_url": ["url": item.dataUrl]
-            ])
-        }
-        return content
     }
 
     private func attachmentSummary(_ attachments: [LittleSpudAttachment]) -> String {
         guard !attachments.isEmpty else { return "" }
         let lines = attachments.enumerated().map { index, item in
-            "\(index + 1). \(item.displayName) (\(item.type), \(formatBytes(item.size)), included as image_url)"
+            "\(index + 1). \(item.displayName) (\(item.type), \(formatBytes(item.size)))"
         }
         return "\n\nAttached media:\n\(lines.joined(separator: "\n"))"
     }
@@ -558,24 +680,63 @@ final class SpudLinkAPI {
         guard (200...299).contains(http.statusCode) else {
             let payload = (try? jsonDictionary(from: data)) ?? [:]
             let detail = payloadErrorMessage(payload, fallback: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
-            throw SpudLinkAPIError.message("\(actionLabel) failed: \(detail)")
+            throw SpudLinkAPIError.httpStatus(action: actionLabel, statusCode: http.statusCode, detail: detail)
         }
     }
 
     private func normalizeHistoryMessage(_ item: [String: Any], session: LittleSpudSession) -> HubHistoryMessage? {
         let roleValue = dictString(item, "role")
         guard let role = LittleSpudRole(rawValue: roleValue) else { return nil }
-        let content = dictString(item, "content")
         let rawAttachments = (item["attachments"] as? [[String: Any]]) ?? (item["artifacts"] as? [[String: Any]]) ?? []
         let attachments = normalizeAssistantArtifacts(rawAttachments, session: session)
+        let content = normalizeHistoryContent(dictString(item, "content"), role: role, attachments: attachments)
         guard !content.isEmpty || !attachments.isEmpty else { return nil }
         return HubHistoryMessage(
             id: dictString(item, "id").ifEmpty(UUID().uuidString),
             role: role,
             content: content,
-            createdAt: dateValue(item, keys: ["createdAt", "created_at"]).ifNil(Date()),
+            createdAt: dateValue(item, keys: ["createdAt", "created_at", "ts"]).ifNil(Date()),
             kind: dictString(dict(item["meta"]), "kind"),
             attachments: attachments
+        )
+    }
+
+    private func normalizeHistoryContent(
+        _ value: String,
+        role: LittleSpudRole,
+        attachments: [LittleSpudAttachment]
+    ) -> String {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard role == .user, !attachments.isEmpty else { return text }
+
+        if let range = text.range(of: "\n\nAttached media:", options: [.caseInsensitive]) {
+            text = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let range = text.range(of: "\nAttached media:", options: [.caseInsensitive]) {
+            text = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let promptOnly = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        if promptOnly.caseInsensitiveCompare("Please review the attached media") == .orderedSame || text.isEmpty {
+            let imageCount = attachments.filter { $0.type.lowercased().hasPrefix("image/") }.count
+            if imageCount == attachments.count {
+                return attachments.count == 1 ? "Attached image" : "Attached images"
+            }
+            return "Attached media"
+        }
+
+        return text
+    }
+
+    private func normalizeActiveRun(_ item: [String: Any]) -> HubActiveRun? {
+        let id = dictString(item, "run_id", "id")
+        guard !id.isEmpty else { return nil }
+        return HubActiveRun(
+            id: id,
+            status: dictString(item, "status").ifEmpty("running"),
+            phase: dictString(item, "phase").ifEmpty("thinking"),
+            text: dictString(item, "text", "wait_text").ifEmpty("Tater is thinking"),
+            startedAt: dateValue(item, keys: ["started_at", "startedAt", "created_at", "createdAt"]).ifNil(Date()),
+            updatedAt: dateValue(item, keys: ["updated_at", "updatedAt", "started_at", "startedAt"]).ifNil(Date())
         )
     }
 
@@ -587,7 +748,7 @@ final class SpudLinkAPI {
             id: dictString(item, "id").ifEmpty(UUID().uuidString),
             title: title,
             message: message,
-            createdAt: dateValue(item, keys: ["createdAt", "created_at"]).ifNil(Date()),
+            createdAt: dateValue(item, keys: ["createdAt", "created_at", "ts"]).ifNil(Date()),
             priority: dictString(item, "priority").ifEmpty(dictString(dict(item["meta"]), "priority").ifEmpty("normal"))
         )
     }

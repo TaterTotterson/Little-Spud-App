@@ -288,11 +288,11 @@ private struct MessageBubble: View {
         HStack {
             if isUser { Spacer(minLength: 48) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
-                Text(message.label)
+                Text(senderLabel)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(AppTheme.muted)
                 if isPending {
-                    ThinkingBubbleContent()
+                    ThinkingBubbleContent(assistantName: model.assistantDisplayName)
                 } else if hasText {
                     Text(message.content)
                         .font(.body)
@@ -318,6 +318,12 @@ private struct MessageBubble: View {
 
     private var mediaAttachments: [LittleSpudAttachment] {
         dedupeAttachments(message.attachments + linkedMediaAttachments)
+    }
+
+    private var senderLabel: String {
+        guard !isUser else { return message.label }
+        let label = message.role == .assistant ? model.assistantDisplayName : message.label
+        return "\(label) · \(message.createdAt.formatted(date: .omitted, time: .shortened))"
     }
 
     private var linkedMediaAttachments: [LittleSpudAttachment] {
@@ -754,13 +760,15 @@ private struct AudioWaveformView: View {
 }
 
 private struct TypingBubble: View {
+    @EnvironmentObject private var model: LittleSpudViewModel
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Tater")
+                Text(model.assistantDisplayName)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(AppTheme.muted)
-                ThinkingBubbleContent()
+                ThinkingBubbleContent(assistantName: model.assistantDisplayName)
             }
             .frame(maxWidth: 360, alignment: .leading)
             Spacer(minLength: 48)
@@ -769,11 +777,12 @@ private struct TypingBubble: View {
 }
 
 private struct ThinkingBubbleContent: View {
+    let assistantName: String
     @State private var animate = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("Tater is thinking")
+            Text("\(assistantName) is thinking")
                 .font(.body)
             HStack(spacing: 4) {
                 ForEach(0..<3) { index in

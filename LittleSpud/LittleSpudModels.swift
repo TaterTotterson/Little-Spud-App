@@ -37,6 +37,7 @@ struct LittleSpudSession: Codable, Equatable {
     var nodeName: String
     var hubName: String
     var hubMode: String
+    var assistantName: String
     var toolsEnabled: Bool?
     var pairedAt: Date
     var lastSeenAt: Date
@@ -75,6 +76,7 @@ struct LittleSpudSession: Codable, Equatable {
         nodeName: String,
         hubName: String,
         hubMode: String,
+        assistantName: String = "Tater",
         toolsEnabled: Bool?,
         pairedAt: Date,
         lastSeenAt: Date
@@ -89,6 +91,7 @@ struct LittleSpudSession: Codable, Equatable {
         self.nodeName = nodeName
         self.hubName = hubName
         self.hubMode = hubMode
+        self.assistantName = assistantName
         self.toolsEnabled = toolsEnabled
         self.pairedAt = pairedAt
         self.lastSeenAt = lastSeenAt
@@ -105,6 +108,7 @@ struct LittleSpudSession: Codable, Equatable {
         case nodeName
         case hubName
         case hubMode
+        case assistantName
         case toolsEnabled
         case pairedAt
         case lastSeenAt
@@ -122,6 +126,7 @@ struct LittleSpudSession: Codable, Equatable {
         nodeName = try container.decode(String.self, forKey: .nodeName)
         hubName = try container.decode(String.self, forKey: .hubName)
         hubMode = try container.decode(String.self, forKey: .hubMode)
+        assistantName = try container.decodeIfPresent(String.self, forKey: .assistantName) ?? "Tater"
         toolsEnabled = try container.decodeIfPresent(Bool.self, forKey: .toolsEnabled)
         pairedAt = try container.decode(Date.self, forKey: .pairedAt)
         lastSeenAt = try container.decode(Date.self, forKey: .lastSeenAt)
@@ -221,6 +226,21 @@ struct HubHistoryMessage {
     var attachments: [LittleSpudAttachment] = []
 }
 
+struct HubActiveRun {
+    var id: String
+    var status: String
+    var phase: String
+    var text: String
+    var startedAt: Date
+    var updatedAt: Date
+}
+
+struct HubSyncState {
+    var messages: [HubHistoryMessage]
+    var activeRuns: [HubActiveRun]
+    var assistantName: String
+}
+
 struct HubNotification {
     var id: String
     var title: String
@@ -233,5 +253,81 @@ struct HubNotification {
             return "\(title)\n\n\(message)"
         }
         return title.isEmpty ? message : title
+    }
+}
+
+struct LittleSpudPushRegistration: Codable, Equatable {
+    var provider: String
+    var app: String
+    var environment: String
+    var pushDeviceId: String
+    var pushSecret: String
+    var gatewayUrl: String
+    var tokenFingerprint: String
+    var registeredAt: Date
+
+    var isComplete: Bool {
+        !provider.isEmpty && !pushDeviceId.isEmpty && !pushSecret.isEmpty
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case app
+        case environment
+        case pushDeviceId
+        case pushSecret
+        case gatewayUrl
+        case relayUrl
+        case tokenFingerprint
+        case apnsTokenFingerprint
+        case registeredAt
+    }
+
+    init(
+        provider: String,
+        app: String,
+        environment: String,
+        pushDeviceId: String,
+        pushSecret: String,
+        gatewayUrl: String,
+        tokenFingerprint: String,
+        registeredAt: Date
+    ) {
+        self.provider = provider
+        self.app = app
+        self.environment = environment
+        self.pushDeviceId = pushDeviceId
+        self.pushSecret = pushSecret
+        self.gatewayUrl = gatewayUrl
+        self.tokenFingerprint = tokenFingerprint
+        self.registeredAt = registeredAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decode(String.self, forKey: .provider)
+        app = try container.decode(String.self, forKey: .app)
+        environment = try container.decode(String.self, forKey: .environment)
+        pushDeviceId = try container.decode(String.self, forKey: .pushDeviceId)
+        pushSecret = try container.decode(String.self, forKey: .pushSecret)
+        gatewayUrl = try container.decodeIfPresent(String.self, forKey: .gatewayUrl)
+            ?? container.decodeIfPresent(String.self, forKey: .relayUrl)
+            ?? ""
+        tokenFingerprint = try container.decodeIfPresent(String.self, forKey: .tokenFingerprint)
+            ?? container.decodeIfPresent(String.self, forKey: .apnsTokenFingerprint)
+            ?? ""
+        registeredAt = try container.decode(Date.self, forKey: .registeredAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(app, forKey: .app)
+        try container.encode(environment, forKey: .environment)
+        try container.encode(pushDeviceId, forKey: .pushDeviceId)
+        try container.encode(pushSecret, forKey: .pushSecret)
+        try container.encode(gatewayUrl, forKey: .gatewayUrl)
+        try container.encode(tokenFingerprint, forKey: .tokenFingerprint)
+        try container.encode(registeredAt, forKey: .registeredAt)
     }
 }

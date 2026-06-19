@@ -72,19 +72,3 @@ enum KeychainError: Error, LocalizedError {
         }
     }
 }
-
-extension JSONEncoder {
-    static var littleSpud: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }
-}
-
-extension JSONDecoder {
-    static var littleSpud: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }
-}

@@ -64,6 +64,12 @@ final class LittleSpudViewModel: ObservableObject {
         return session.displayNodeName
     }
 
+    var assistantDisplayName: String {
+        session?.assistantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? session?.assistantName.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Tater"
+            : "Tater"
+    }
+
     var connectedSubtitle: String {
         guard let session else { return "Not paired" }
         let toolLabel: String
@@ -83,6 +89,9 @@ final class LittleSpudViewModel: ObservableObject {
     private let sessionAccount = "little-spud-session"
     private let messagesKey = "little-spud-ios:messages:v1"
     private let notificationsKey = "little-spud-ios:notifications"
+    private let remotePushTokenKey = "little-spud-ios:remote-push-token"
+    private let remotePushRegistrationAccount = "little-spud-remote-push-registration"
+    private let legacyRemotePushRegistrationKey = "little-spud-ios:remote-push-registration"
     private let ttsKey = "little-spud-ios:tts-enabled"
     private let demoHubUrl = "demo://little-spud"
     private let demoToken = "little-spud-demo-token"
@@ -97,6 +106,10 @@ final class LittleSpudViewModel: ObservableObject {
     private var pendingReopenTask: Task<Void, Never>?
     private var demoVoiceTask: Task<Void, Never>?
     private var activeChatRunCount = 0
+    private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundGraceTask: Task<Void, Never>?
+    private var pushRegistrationTask: Task<Void, Never>?
+    private var remotePushRegistrationUnsupported = false
 
     func start() {
         guard !didStart else { return }
@@ -106,6 +119,10 @@ final class LittleSpudViewModel: ObservableObject {
         ttsStatus = ttsEnabled ? "TTS on" : ""
         loadSession()
         loadMessages()
+        importSharedResolvedNotifications()
+        if notificationsEnabled {
+            requestRemoteNotifications()
+        }
         if session == nil {
             hubConnected = false
             if userName.isEmpty {
@@ -122,25 +139,32 @@ final class LittleSpudViewModel: ObservableObject {
 
     func resume() {
         guard session != nil else { return }
+        endBackgroundGracePeriod()
         if isDemoMode {
             hubConnected = true
             return
         }
+        importSharedResolvedNotifications()
         startNotificationPoll()
         startRouteProbe()
+        syncRemotePushRegistrationIfPossible()
         Task { [weak self] in
             await self?.refreshFromHub(showStatus: false)
         }
     }
 
     func pauseForegroundWork() {
-        pollTask?.cancel()
-        pollTask = nil
         routeProbeTask?.cancel()
         routeProbeTask = nil
         demoVoiceTask?.cancel()
         demoVoiceTask = nil
         cancelVoiceInput()
+        if pollTask != nil || activeChatRunCount > 0 {
+            beginBackgroundGracePeriod()
+        } else {
+            pollTask?.cancel()
+            pollTask = nil
+        }
     }
 
     func pair() {
@@ -167,8 +191,10 @@ final class LittleSpudViewModel: ObservableObject {
                 syncCode = ""
                 statusText = "Connected. Little Spud is ready."
                 statusKind = "ok"
+                remotePushRegistrationUnsupported = false
                 saveSession()
                 UserDefaults.standard.set(userName, forKey: "little-spud-ios:user-name")
+                syncRemotePushRegistrationIfPossible(force: true)
                 await refreshFromHub(showStatus: false)
                 startNotificationPoll()
                 startRouteProbe()
@@ -295,8 +321,11 @@ final class LittleSpudViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
+            var shouldFinishChatRun = true
             defer {
-                self.finishChatRun()
+                if shouldFinishChatRun {
+                    self.finishChatRun()
+                }
                 self.saveMessages()
             }
             do {
@@ -330,6 +359,13 @@ final class LittleSpudViewModel: ObservableObject {
                     reopenMicAfterReply()
                 }
             } catch {
+                if self.isRecoverableChatDisconnect(error) {
+                    shouldFinishChatRun = false
+                    self.finishChatRun()
+                    await self.markChatRunDetached(assistantId: assistantId)
+                    self.saveMessages()
+                    return
+                }
                 let errorMessage = "Request failed: \(error.localizedDescription)"
                 if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
                     messages[messageIndex] = LittleSpudMessage(
@@ -561,21 +597,22 @@ final class LittleSpudViewModel: ObservableObject {
 
     func toggleNotifications() {
         if notificationsEnabled {
-            notificationsEnabled = false
-            UserDefaults.standard.set(false, forKey: notificationsKey)
+            setDeviceNotificationsEnabled(false)
             statusText = "Device notifications paused."
             statusKind = ""
+            disableRemotePushRegistration()
             return
         }
 
         Task { [weak self] in
             guard let self else { return }
             let granted = await LocalNotificationManager.shared.requestAuthorization()
-            notificationsEnabled = granted
-            UserDefaults.standard.set(granted, forKey: notificationsKey)
+            setDeviceNotificationsEnabled(granted)
             if granted {
                 statusText = "Device notifications enabled."
                 statusKind = "ok"
+                requestRemoteNotifications()
+                syncRemotePushRegistrationIfPossible(force: true)
                 LocalNotificationManager.shared.deliver(NativeNotificationPayload(
                     title: "Little Spud",
                     body: "Device notifications enabled.",
@@ -589,17 +626,146 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    func handleRemotePushToken(_ token: String) {
+        let clean = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        UserDefaults.standard.set(clean, forKey: remotePushTokenKey)
+        syncRemotePushRegistrationIfPossible(force: true)
+    }
+
+    func handleRemotePushRegistrationFailure(_ message: String?) {
+        guard notificationsEnabled else { return }
+        let clean = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty {
+            print("Little Spud remote notification registration failed: \(clean)")
+        }
+    }
+
     func disconnect() {
+        let currentSession = session
+        if notificationsEnabled {
+            setDeviceNotificationsEnabled(false)
+            disableRemotePushRegistration()
+        } else {
+            pushRegistrationTask?.cancel()
+            pushRegistrationTask = nil
+            clearStoredRemotePushRegistration()
+        }
         pauseForegroundWork()
         stopSpeech()
         cancelVoiceInput()
         KeychainStore.delete(account: sessionAccount)
+        LittleSpudShared.clearNotificationContext()
+        _ = LittleSpudShared.consumeResolvedNotifications()
+        clearLocalMessages()
         session = nil
         hubConnected = false
         hubUrl = ""
         syncCode = ""
         statusText = "Little Spud forgot this pairing."
         statusKind = ""
+
+        guard let currentSession, !currentSession.isDemo else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await api.forgetPairing(session: currentSession)
+            } catch {
+                print("Little Spud remote forget failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private var remotePushEnvironment: String {
+        #if DEBUG
+        return "development"
+        #else
+        return "production"
+        #endif
+    }
+
+    private func requestRemoteNotifications() {
+        Task { [weak self] in
+            guard let self else { return }
+            let granted = await LocalNotificationManager.shared.requestAuthorization()
+            guard granted else {
+                setDeviceNotificationsEnabled(false)
+                return
+            }
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
+    private func setDeviceNotificationsEnabled(_ enabled: Bool) {
+        notificationsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: notificationsKey)
+    }
+
+    private func syncRemotePushRegistrationIfPossible(force: Bool = false) {
+        guard notificationsEnabled else { return }
+        guard let currentSession = session, !currentSession.isDemo else { return }
+        guard force || !remotePushRegistrationUnsupported else { return }
+        guard let token = UserDefaults.standard.string(forKey: remotePushTokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            requestRemoteNotifications()
+            return
+        }
+        if pushRegistrationTask != nil && !force {
+            return
+        }
+        pushRegistrationTask?.cancel()
+        pushRegistrationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.pushRegistrationTask = nil }
+            do {
+                let fingerprint = String(token.suffix(24))
+                var registration = loadStoredRemotePushRegistration()
+                if force || registration?.tokenFingerprint != fingerprint || registration?.isComplete != true {
+                    registration = try await api.registerPushGateway(
+                        fcmToken: token,
+                        session: currentSession,
+                        environment: remotePushEnvironment
+                    )
+                    if let registration {
+                        saveStoredRemotePushRegistration(registration)
+                    }
+                }
+                guard let registration, registration.isComplete else { return }
+                let updated = try await api.updatePushRegistration(
+                    session: currentSession,
+                    registration: registration,
+                    enabled: true
+                )
+                session = updated
+                hubUrl = updated.hubUrl
+                hubConnected = true
+                saveSession()
+            } catch {
+                if (error as? SpudLinkAPIError)?.statusCode == 404 {
+                    remotePushRegistrationUnsupported = true
+                    print("Little Spud push sync skipped: paired Tater does not support push registration yet.")
+                    return
+                }
+                print("Little Spud push sync failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func disableRemotePushRegistration() {
+        pushRegistrationTask?.cancel()
+        pushRegistrationTask = nil
+        guard let currentSession = session, !currentSession.isDemo else {
+            clearStoredRemotePushRegistration()
+            return
+        }
+        clearStoredRemotePushRegistration()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await api.updatePushRegistration(session: currentSession, registration: nil, enabled: false)
+            } catch {
+                print("Little Spud push disable failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func refreshFromHub(showStatus: Bool) async {
@@ -614,18 +780,62 @@ final class LittleSpudViewModel: ObservableObject {
             hubUrl = updated.hubUrl
             hubConnected = true
             saveSession()
-            let history = try await api.fetchHistory(session: updated)
-            mergeHubHistory(history)
+            syncRemotePushRegistrationIfPossible()
+            let syncState = try await api.fetchHistoryState(session: updated)
+            updateAssistantName(syncState.assistantName)
+            mergeHubHistory(syncState.messages)
+            mergeActiveRuns(syncState.activeRuns)
             if showStatus {
                 statusText = "Synced with Tater."
                 statusKind = "ok"
             }
         } catch {
-            hubConnected = false
+            markHubDisconnectedIfIdle()
             if showStatus {
                 statusText = error.localizedDescription
                 statusKind = "error"
             }
+        }
+    }
+
+    private func updateAssistantName(_ name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, var current = session, current.assistantName != clean else { return }
+        current.assistantName = clean
+        session = current
+        saveSession()
+    }
+
+    private func beginBackgroundGracePeriod() {
+        guard backgroundTaskId == .invalid else { return }
+        backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "Little Spud Sync") { [weak self] in
+            Task { @MainActor in
+                self?.pollTask?.cancel()
+                self?.pollTask = nil
+                self?.endBackgroundGracePeriod()
+            }
+        }
+        guard backgroundTaskId != .invalid else { return }
+
+        backgroundGraceTask?.cancel()
+        backgroundGraceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            await MainActor.run {
+                guard let self else { return }
+                self.pollTask?.cancel()
+                self.pollTask = nil
+                self.endBackgroundGracePeriod()
+            }
+        }
+    }
+
+    private func endBackgroundGracePeriod() {
+        backgroundGraceTask?.cancel()
+        backgroundGraceTask = nil
+        let taskId = backgroundTaskId
+        backgroundTaskId = .invalid
+        if taskId != .invalid {
+            UIApplication.shared.endBackgroundTask(taskId)
         }
     }
 
@@ -644,7 +854,7 @@ final class LittleSpudViewModel: ObservableObject {
                     }
                 } catch {
                     await MainActor.run {
-                        self?.hubConnected = false
+                        self?.markHubDisconnectedIfIdle()
                         Task { [weak self] in
                             await self?.refreshFromHub(showStatus: false)
                         }
@@ -676,6 +886,52 @@ final class LittleSpudViewModel: ObservableObject {
         activeChatRunCount = max(0, activeChatRunCount - 1)
         isSending = activeChatRunCount > 0
         isTyping = false
+    }
+
+    private func markHubDisconnectedIfIdle() {
+        guard activeChatRunCount <= 0 else { return }
+        hubConnected = false
+    }
+
+    private func markChatRunDetached(assistantId: String) async {
+        if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
+            messages[messageIndex].content = "Tater is thinking"
+            messages[messageIndex].kind = "pending"
+        } else {
+            messages.append(LittleSpudMessage(
+                id: assistantId,
+                role: .assistant,
+                content: "Tater is thinking",
+                createdAt: Date(),
+                kind: "pending"
+            ))
+        }
+        statusText = "Tater is still working on that."
+        statusKind = "ok"
+        await refreshFromHub(showStatus: false)
+    }
+
+    private func isRecoverableChatDisconnect(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorTimedOut,
+                NSURLErrorCancelled,
+                NSURLErrorNetworkConnectionLost,
+                NSURLErrorNotConnectedToInternet,
+                NSURLErrorCannotFindHost,
+                NSURLErrorCannotConnectToHost:
+                return true
+            default:
+                break
+            }
+        }
+        let message = error.localizedDescription.lowercased()
+        return message.contains("timed out")
+            || message.contains("cancelled")
+            || message.contains("network connection was lost")
+            || message.contains("offline")
+            || message.contains("not connected")
     }
 
     private func appendToolNotice(_ notice: SpudLinkToolNotice, beforeAssistantId: String) {
@@ -721,14 +977,8 @@ final class LittleSpudViewModel: ObservableObject {
         messages.append(message)
         sortAndLimitMessages()
         saveMessages()
-        if notificationsEnabled {
-            LocalNotificationManager.shared.deliver(NativeNotificationPayload(
-                title: "Little Spud",
-                body: message.content.replacingOccurrences(of: "\n", with: " "),
-                tag: message.id,
-                url: nil
-            ))
-        }
+        // Remote push owns device notifications on iOS. Polling only updates chat
+        // history so a pushed notification is not duplicated by a local alert.
     }
 
     private func mergeHubHistory(_ history: [HubHistoryMessage]) {
@@ -742,9 +992,7 @@ final class LittleSpudViewModel: ObservableObject {
                 }
             }
             let softDuplicate = messages.contains { existing in
-                existing.role == incoming.role
-                && existing.content.trimmingCharacters(in: .whitespacesAndNewlines) == incoming.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                && (existing.kind != "tool_notice" || incoming.kind == "tool_notice")
+                isHubHistoryDuplicate(existing: existing, incoming: incoming)
             }
             guard !messages.contains(where: { $0.id == incoming.id }) && !softDuplicate else { continue }
             messages.append(LittleSpudMessage(
@@ -761,6 +1009,71 @@ final class LittleSpudViewModel: ObservableObject {
             sortAndLimitMessages()
             saveMessages()
         }
+    }
+
+    private func isHubHistoryDuplicate(existing: LittleSpudMessage, incoming: HubHistoryMessage) -> Bool {
+        guard existing.role == incoming.role else { return false }
+        guard existing.kind != "tool_notice" || incoming.kind == "tool_notice" else { return false }
+
+        let existingContent = existing.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingContent = incoming.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard existingContent == incomingContent else { return false }
+
+        if incoming.attachments.isEmpty && existing.attachments.isEmpty {
+            return true
+        }
+
+        guard existing.role == .user else { return false }
+        let existingKeys = attachmentIdentityKeys(existing.attachments)
+        let incomingKeys = attachmentIdentityKeys(incoming.attachments)
+        if !existingKeys.isEmpty && !incomingKeys.isEmpty && !existingKeys.isDisjoint(with: incomingKeys) {
+            return true
+        }
+
+        let secondsApart = abs(existing.createdAt.timeIntervalSince(incoming.createdAt))
+        return secondsApart <= 45 && (!existing.attachments.isEmpty || !incoming.attachments.isEmpty)
+    }
+
+    private func attachmentIdentityKeys(_ attachments: [LittleSpudAttachment]) -> Set<String> {
+        Set(attachments.compactMap { item in
+            let name = item.displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let type = item.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !name.isEmpty || !type.isEmpty || item.size > 0 else { return nil }
+            return "\(name)|\(type)|\(item.size)"
+        })
+    }
+
+    private func mergeActiveRuns(_ activeRuns: [HubActiveRun]) {
+        let running = activeRuns.filter { run in
+            let status = run.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return status.isEmpty || status == "queued" || status == "running"
+        }
+        guard let latest = running.sorted(by: { $0.updatedAt > $1.updatedAt }).first else { return }
+
+        let pendingText = latest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Tater is thinking"
+            : latest.text
+
+        if let pendingIndex = messages.lastIndex(where: { message in
+            message.role == .assistant && message.kind == "pending"
+        }) {
+            messages[pendingIndex].content = pendingText
+            messages[pendingIndex].kind = "pending"
+            saveMessages()
+            return
+        }
+
+        let activeMessageId = "active-\(latest.id)"
+        guard !messages.contains(where: { $0.id == activeMessageId }) else { return }
+        messages.append(LittleSpudMessage(
+            id: activeMessageId,
+            role: .assistant,
+            content: pendingText,
+            createdAt: latest.startedAt,
+            kind: "pending"
+        ))
+        sortAndLimitMessages()
+        saveMessages()
     }
 
     private func reconcileIncomingAssistant(_ incoming: HubHistoryMessage) -> Bool {
@@ -1248,6 +1561,9 @@ final class LittleSpudViewModel: ObservableObject {
             userName = stored?.userName ?? userName
             deviceName = stored?.deviceName ?? deviceName
             hubUrl = stored?.hubUrl ?? hubUrl
+            if let stored, !stored.isDemo {
+                saveSharedNotificationContext(for: stored)
+            }
         } catch {
             hubConnected = false
             statusText = error.localizedDescription
@@ -1259,20 +1575,131 @@ final class LittleSpudViewModel: ObservableObject {
         guard let session else { return }
         do {
             try KeychainStore.save(session, account: sessionAccount)
+            if session.isDemo {
+                LittleSpudShared.clearNotificationContext()
+            } else {
+                saveSharedNotificationContext(for: session)
+            }
         } catch {
             statusText = error.localizedDescription
             statusKind = "error"
         }
     }
 
+    private func saveSharedNotificationContext(for session: LittleSpudSession) {
+        LittleSpudShared.saveNotificationContext(LittleSpudShared.NotificationContext(
+            hubUrl: session.hubUrl,
+            homeHubUrl: session.homeHubUrl,
+            awayHubUrl: session.awayHubUrl,
+            token: session.token,
+            userName: session.userName,
+            deviceName: session.deviceName,
+            updatedAt: Date()
+        ))
+    }
+
+    private func importSharedResolvedNotifications() {
+        let resolved = LittleSpudShared.consumeResolvedNotifications()
+        guard !resolved.isEmpty else { return }
+        var changed = false
+        for item in resolved {
+            let notification = HubNotification(
+                id: item.id,
+                title: item.title,
+                message: item.message,
+                createdAt: item.createdAt,
+                priority: item.priority
+            )
+            let exists = messages.contains { existing in
+                existing.id == notification.id || (existing.kind == "notification" && existing.content == notification.content)
+            }
+            guard !exists else { continue }
+            messages.append(LittleSpudMessage(
+                id: notification.id,
+                role: .system,
+                content: notification.content.isEmpty ? "Notification" : notification.content,
+                createdAt: notification.createdAt,
+                kind: "notification"
+            ))
+            changed = true
+        }
+        if changed {
+            sortAndLimitMessages()
+            saveMessages()
+        }
+    }
+
     private func loadMessages() {
+        if let url = messagesStoreURL(), let data = try? Data(contentsOf: url) {
+            messages = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+            sortAndLimitMessages()
+            return
+        }
+
         guard let data = UserDefaults.standard.data(forKey: messagesKey) else { return }
         messages = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+        sortAndLimitMessages()
+        UserDefaults.standard.removeObject(forKey: messagesKey)
+        saveMessages()
+    }
+
+    private func loadStoredRemotePushRegistration() -> LittleSpudPushRegistration? {
+        if let stored = try? KeychainStore.load(LittleSpudPushRegistration.self, account: remotePushRegistrationAccount) {
+            return stored
+        }
+        guard let data = UserDefaults.standard.data(forKey: legacyRemotePushRegistrationKey),
+              let legacy = try? JSONDecoder.littleSpud.decode(LittleSpudPushRegistration.self, from: data)
+        else { return nil }
+        saveStoredRemotePushRegistration(legacy)
+        UserDefaults.standard.removeObject(forKey: legacyRemotePushRegistrationKey)
+        return legacy
+    }
+
+    private func saveStoredRemotePushRegistration(_ registration: LittleSpudPushRegistration) {
+        do {
+            try KeychainStore.save(registration, account: remotePushRegistrationAccount)
+            UserDefaults.standard.removeObject(forKey: legacyRemotePushRegistrationKey)
+        } catch {
+            print("Little Spud push registration save failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func clearStoredRemotePushRegistration() {
+        KeychainStore.delete(account: remotePushRegistrationAccount)
+        UserDefaults.standard.removeObject(forKey: legacyRemotePushRegistrationKey)
+    }
+
+    private func hasStoredRemotePushRegistration() -> Bool {
+        loadStoredRemotePushRegistration()?.isComplete == true
     }
 
     private func saveMessages() {
-        let trimmed = Array(messages.suffix(80))
-        guard let data = try? JSONEncoder.littleSpud.encode(trimmed) else { return }
-        UserDefaults.standard.set(data, forKey: messagesKey)
+        messages = Array(messages.suffix(80))
+        guard let data = try? JSONEncoder.littleSpud.encode(messages), let url = messagesStoreURL() else { return }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: [.atomic])
+            UserDefaults.standard.removeObject(forKey: messagesKey)
+        } catch {
+            print("Little Spud message history save failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func clearLocalMessages() {
+        messages = []
+        pendingAttachments = []
+        draft = ""
+        completedMessageId = nil
+        UserDefaults.standard.removeObject(forKey: messagesKey)
+        if let url = messagesStoreURL() {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func messagesStoreURL() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        return base
+            .appendingPathComponent("LittleSpud", isDirectory: true)
+            .appendingPathComponent("messages-v1.json")
     }
 }

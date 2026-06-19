@@ -23,6 +23,10 @@
   <string>$(CURRENT_PROJECT_VERSION)</string>
   <key>LSRequiresIPhoneOS</key>
   <true/>
+  <key>FirebaseAppDelegateProxyEnabled</key>
+  <false/>
+  <key>FirebaseMessagingAutoInitEnabled</key>
+  <false/>
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UILaunchScreen</key>
