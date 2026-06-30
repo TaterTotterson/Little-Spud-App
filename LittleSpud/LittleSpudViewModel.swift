@@ -11,6 +11,7 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var syncCode = ""
     @Published var session: LittleSpudSession?
     @Published var messages: [LittleSpudMessage] = []
+    @Published var notifications: [LittleSpudMessage] = []
     @Published var draft = ""
     @Published var statusText = ""
     @Published var statusKind = ""
@@ -27,6 +28,14 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var speechStatus = ""
     @Published var hubConnected = false
     @Published var pendingAttachments: [LittleSpudAttachment] = []
+    @Published var notificationUnreadCount = 0
+    @Published var activeLane: LittleSpudLane = .chat {
+        didSet {
+            if activeLane == .notifications {
+                markNotificationsRead()
+            }
+        }
+    }
 
     var connectionRoute: LittleSpudConnectionRoute {
         session?.displayRoute ?? .unknown
@@ -88,6 +97,7 @@ final class LittleSpudViewModel: ObservableObject {
     private let api = SpudLinkAPI()
     private let sessionAccount = "little-spud-session"
     private let messagesKey = "little-spud-ios:messages:v1"
+    private let notificationMessagesKey = "little-spud-ios:notification-messages:v1"
     private let notificationsKey = "little-spud-ios:notifications"
     private let remotePushTokenKey = "little-spud-ios:remote-push-token"
     private let remotePushRegistrationAccount = "little-spud-remote-push-registration"
@@ -110,6 +120,7 @@ final class LittleSpudViewModel: ObservableObject {
     private var backgroundGraceTask: Task<Void, Never>?
     private var pushRegistrationTask: Task<Void, Never>?
     private var remotePushRegistrationUnsupported = false
+    private var pendingNotificationAckIDs: Set<String> = []
 
     func start() {
         guard !didStart else { return }
@@ -118,6 +129,7 @@ final class LittleSpudViewModel: ObservableObject {
         ttsEnabled = UserDefaults.standard.bool(forKey: ttsKey)
         ttsStatus = ttsEnabled ? "TTS on" : ""
         loadSession()
+        loadNotifications()
         loadMessages()
         importSharedResolvedNotifications()
         if notificationsEnabled {
@@ -286,11 +298,13 @@ final class LittleSpudViewModel: ObservableObject {
         let priorMessages = messages
         let assistantId = UUID().uuidString
         let userContent = text.isEmpty ? (outgoingAttachments.count == 1 ? "Attached image" : "Attached images") : text
+        let userCreatedAt = Date()
+        let assistantCreatedAt = userCreatedAt.addingTimeInterval(0.001)
         let userMessage = LittleSpudMessage(
             id: UUID().uuidString,
             role: .user,
             content: userContent,
-            createdAt: Date(),
+            createdAt: userCreatedAt,
             kind: nil,
             attachments: outgoingAttachments
         )
@@ -299,7 +313,7 @@ final class LittleSpudViewModel: ObservableObject {
             id: assistantId,
             role: .assistant,
             content: "Tater is thinking",
-            createdAt: Date(),
+            createdAt: assistantCreatedAt,
             kind: "pending"
         ))
         draft = ""
@@ -573,6 +587,22 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    func showChatLane() {
+        activeLane = .chat
+    }
+
+    func showNotificationLane() {
+        activeLane = .notifications
+    }
+
+    func toggleNotificationLane() {
+        activeLane = activeLane == .notifications ? .chat : .notifications
+    }
+
+    func markNotificationsRead() {
+        notificationUnreadCount = 0
+    }
+
     func toggleVoiceInput() {
         guard session != nil else {
             statusText = "Pair Little Spud before using voice input."
@@ -844,12 +874,23 @@ final class LittleSpudViewModel: ObservableObject {
         let client = self.api
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let snapshot = await MainActor.run(body: { self?.session }) else { return }
+                let state = await MainActor.run { () -> (LittleSpudSession?, Bool) in
+                    guard let self else { return (nil, false) }
+                    return (self.session, self.notificationsEnabled)
+                }
+                guard let snapshot = state.0 else { return }
+                let consumeNotification = !state.1
                 do {
-                    if let notification = try await client.pollNotification(session: snapshot) {
+                    if let notification = try await client.pollNotification(session: snapshot, consume: consumeNotification) {
                         await MainActor.run {
                             self?.hubConnected = true
                             self?.appendHubNotification(notification)
+                            if !consumeNotification {
+                                self?.schedulePeekedNotificationAck(notification, session: snapshot)
+                            }
+                        }
+                        if !consumeNotification {
+                            try? await Task.sleep(nanoseconds: 5_000_000_000)
                         }
                     }
                 } catch {
@@ -861,6 +902,20 @@ final class LittleSpudViewModel: ObservableObject {
                     }
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
+            }
+        }
+    }
+
+    private func schedulePeekedNotificationAck(_ notification: HubNotification, session: LittleSpudSession) {
+        let eventID = notification.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !eventID.isEmpty, !pendingNotificationAckIDs.contains(eventID) else { return }
+        pendingNotificationAckIDs.insert(eventID)
+        let client = api
+        Task { [weak self, client, session, eventID] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            try? await client.acknowledgeNotification(session: session, eventID: eventID)
+            await MainActor.run {
+                _ = self?.pendingNotificationAckIDs.remove(eventID)
             }
         }
     }
@@ -939,16 +994,28 @@ final class LittleSpudViewModel: ObservableObject {
         guard !clean.isEmpty else { return }
         let exists = messages.contains { $0.id == notice.id }
         guard !exists else { return }
-        let message = LittleSpudMessage(
-            id: notice.id,
-            role: .assistant,
-            content: "",
-            createdAt: notice.createdAt,
-            kind: "tool_notice"
-        )
         if let assistantIndex = messages.firstIndex(where: { $0.id == beforeAssistantId }) {
+            let existingToolCount = messages[..<assistantIndex].reversed().prefix { message in
+                message.role == .assistant && message.kind == "tool_notice"
+            }.count
+            let anchoredDate = messages[assistantIndex].createdAt
+                .addingTimeInterval(-0.25 + (Double(existingToolCount) * 0.01))
+            let message = LittleSpudMessage(
+                id: notice.id,
+                role: .assistant,
+                content: "",
+                createdAt: anchoredDate,
+                kind: "tool_notice"
+            )
             messages.insert(message, at: assistantIndex)
         } else {
+            let message = LittleSpudMessage(
+                id: notice.id,
+                role: .assistant,
+                content: "",
+                createdAt: notice.createdAt,
+                kind: "tool_notice"
+            )
             messages.append(message)
         }
         saveMessages()
@@ -970,13 +1037,7 @@ final class LittleSpudViewModel: ObservableObject {
             createdAt: notification.createdAt,
             kind: "notification"
         )
-        let exists = messages.contains { existing in
-            existing.id == message.id || (existing.kind == "notification" && existing.content == message.content)
-        }
-        guard !exists else { return }
-        messages.append(message)
-        sortAndLimitMessages()
-        saveMessages()
+        appendNotificationMessage(message)
         // Remote push owns device notifications on iOS. Polling only updates chat
         // history so a pushed notification is not duplicated by a local alert.
     }
@@ -984,17 +1045,32 @@ final class LittleSpudViewModel: ObservableObject {
     private func mergeHubHistory(_ history: [HubHistoryMessage]) {
         guard !history.isEmpty else { return }
         var changed = false
+        let newestLocalBeforeMerge = messages.map(\.createdAt).max()
         for incoming in history {
+            let softDuplicate = messages.contains { existing in
+                isHubHistoryDuplicate(existing: existing, incoming: incoming)
+            }
+            guard !messages.contains(where: { $0.id == incoming.id }) && !softDuplicate else { continue }
+            if shouldSkipStaleHubHistory(incoming, newestLocalBeforeMerge: newestLocalBeforeMerge) {
+                continue
+            }
+            if incoming.kind == "notification" {
+                appendNotificationMessage(LittleSpudMessage(
+                    id: incoming.id,
+                    role: .system,
+                    content: incoming.content,
+                    createdAt: incoming.createdAt,
+                    kind: "notification",
+                    attachments: incoming.attachments
+                ), markUnread: false)
+                continue
+            }
             if incoming.role == .assistant, incoming.kind != "tool_notice" {
                 if reconcileIncomingAssistant(incoming) {
                     changed = true
                     continue
                 }
             }
-            let softDuplicate = messages.contains { existing in
-                isHubHistoryDuplicate(existing: existing, incoming: incoming)
-            }
-            guard !messages.contains(where: { $0.id == incoming.id }) && !softDuplicate else { continue }
             messages.append(LittleSpudMessage(
                 id: incoming.id,
                 role: incoming.role,
@@ -1009,6 +1085,12 @@ final class LittleSpudViewModel: ObservableObject {
             sortAndLimitMessages()
             saveMessages()
         }
+    }
+
+    private func shouldSkipStaleHubHistory(_ incoming: HubHistoryMessage, newestLocalBeforeMerge: Date?) -> Bool {
+        guard let newestLocalBeforeMerge, !messages.isEmpty else { return false }
+        guard incoming.createdAt < newestLocalBeforeMerge.addingTimeInterval(-2) else { return false }
+        return true
     }
 
     private func isHubHistoryDuplicate(existing: LittleSpudMessage, incoming: HubHistoryMessage) -> Bool {
@@ -1096,7 +1178,11 @@ final class LittleSpudViewModel: ObservableObject {
         }
 
         let pendingMessage = messages[pendingIndex]
-        if activeChatRunCount > 0 && incoming.createdAt >= pendingMessage.createdAt.addingTimeInterval(-2) {
+        guard incoming.createdAt >= pendingMessage.createdAt.addingTimeInterval(-2) else {
+            return false
+        }
+
+        if activeChatRunCount > 0 {
             return true
         }
 
@@ -1179,13 +1265,7 @@ final class LittleSpudViewModel: ObservableObject {
                 stopSpeech()
                 cleanupVoiceInput(closeSocket: true)
 
-                let audioSession = AVAudioSession.sharedInstance()
-                try audioSession.setCategory(
-                    .playAndRecord,
-                    mode: .voiceChat,
-                    options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers]
-                )
-                try audioSession.setActive(true)
+                try configureAudioSessionForVoiceInput()
 
                 let engine = AVAudioEngine()
                 let inputNode = engine.inputNode
@@ -1274,6 +1354,7 @@ final class LittleSpudViewModel: ObservableObject {
         }
         audioEngine?.stop()
         audioEngine = nil
+        deactivateAudioSessionIfIdle()
     }
 
     private func startReceivingSpeechMessages(_ socket: URLSessionWebSocketTask) {
@@ -1481,9 +1562,7 @@ final class LittleSpudViewModel: ObservableObject {
         do {
             let data = try await api.fetchSpeech(session: session, text: speechText)
             guard ttsEnabled else { return nil }
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try audioSession.setActive(true)
+            try configureAudioSessionForSpeechPlayback()
             let player = try AVAudioPlayer(data: data)
             player.prepareToPlay()
             audioPlayer = player
@@ -1497,6 +1576,7 @@ final class LittleSpudViewModel: ObservableObject {
                     guard let self, let player, self.audioPlayer === player else { return }
                     self.audioPlayer = nil
                     self.ttsStatus = self.ttsEnabled ? "TTS on" : ""
+                    self.deactivateAudioSessionIfIdle()
                 }
             }
         } catch {
@@ -1510,6 +1590,7 @@ final class LittleSpudViewModel: ObservableObject {
     private func prepareDemoSpeechPlayback(_ speechText: String) -> Task<Void, Never>? {
         stopSpeech()
         ttsStatus = "Speaking..."
+        try? configureAudioSessionForSpeechPlayback()
         let utterance = AVSpeechUtterance(string: speechText)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
@@ -1523,6 +1604,7 @@ final class LittleSpudViewModel: ObservableObject {
                 if self.isDemoMode {
                     self.ttsStatus = self.ttsEnabled ? "TTS on" : ""
                 }
+                self.deactivateAudioSessionIfIdle()
             }
         }
     }
@@ -1533,6 +1615,28 @@ final class LittleSpudViewModel: ObservableObject {
         if speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
+        deactivateAudioSessionIfIdle()
+    }
+
+    private func configureAudioSessionForSpeechPlayback() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers, .duckOthers])
+        try audioSession.setActive(true)
+    }
+
+    private func configureAudioSessionForVoiceInput() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(
+            .playAndRecord,
+            mode: .voiceChat,
+            options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers, .duckOthers]
+        )
+        try audioSession.setActive(true)
+    }
+
+    private func deactivateAudioSessionIfIdle() {
+        guard audioPlayer == nil, audioEngine == nil, !speechSynthesizer.isSpeaking else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
     private func textForSpeech(_ value: String) -> String {
@@ -1547,9 +1651,49 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     private func sortAndLimitMessages() {
-        messages.sort { $0.createdAt < $1.createdAt }
+        messages.sort { lhs, rhs in
+            let delta = lhs.createdAt.timeIntervalSince(rhs.createdAt)
+            if abs(delta) > 0.0005 {
+                return delta < 0
+            }
+            let lhsRank = messageSortRank(lhs)
+            let rhsRank = messageSortRank(rhs)
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return lhs.id < rhs.id
+        }
         if messages.count > 80 {
             messages = Array(messages.suffix(80))
+        }
+    }
+
+    private func sortAndLimitNotifications() {
+        notifications.sort {
+            if $0.createdAt == $1.createdAt {
+                return $0.id < $1.id
+            }
+            return $0.createdAt < $1.createdAt
+        }
+        if notifications.count > 120 {
+            notifications = Array(notifications.suffix(120))
+        }
+    }
+
+    private func messageSortRank(_ message: LittleSpudMessage) -> Int {
+        switch message.role {
+        case .user:
+            return 0
+        case .assistant:
+            if message.kind == "tool_notice" {
+                return 1
+            }
+            if message.kind == "pending" {
+                return 2
+            }
+            return 3
+        case .system:
+            return 4
         }
     }
 
@@ -1601,7 +1745,6 @@ final class LittleSpudViewModel: ObservableObject {
     private func importSharedResolvedNotifications() {
         let resolved = LittleSpudShared.consumeResolvedNotifications()
         guard !resolved.isEmpty else { return }
-        var changed = false
         for item in resolved {
             let notification = HubNotification(
                 id: item.id,
@@ -1610,34 +1753,68 @@ final class LittleSpudViewModel: ObservableObject {
                 createdAt: item.createdAt,
                 priority: item.priority
             )
-            let exists = messages.contains { existing in
-                existing.id == notification.id || (existing.kind == "notification" && existing.content == notification.content)
-            }
-            guard !exists else { continue }
-            messages.append(LittleSpudMessage(
+            appendNotificationMessage(LittleSpudMessage(
                 id: notification.id,
                 role: .system,
                 content: notification.content.isEmpty ? "Notification" : notification.content,
                 createdAt: notification.createdAt,
                 kind: "notification"
             ))
-            changed = true
         }
-        if changed {
-            sortAndLimitMessages()
-            saveMessages()
+    }
+
+    private func appendNotificationMessage(_ message: LittleSpudMessage, markUnread: Bool = true) {
+        let normalized = LittleSpudMessage(
+            id: message.id,
+            role: .system,
+            content: message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Notification" : message.content,
+            createdAt: message.createdAt,
+            kind: "notification",
+            attachments: message.attachments
+        )
+        guard mergeStoredNotificationMessage(normalized) else { return }
+        sortAndLimitNotifications()
+        saveNotifications()
+        if markUnread && activeLane != .notifications {
+            notificationUnreadCount += 1
         }
+    }
+
+    @discardableResult
+    private func mergeStoredNotificationMessage(_ message: LittleSpudMessage) -> Bool {
+        let exists = notifications.contains { existing in
+            existing.id == message.id || (existing.kind == "notification" && existing.content == message.content)
+        }
+        guard !exists else { return false }
+        notifications.append(message)
+        return true
+    }
+
+    private func loadNotifications() {
+        if let url = notificationsStoreURL(), let data = try? Data(contentsOf: url) {
+            notifications = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+            sortAndLimitNotifications()
+            return
+        }
+
+        guard let data = UserDefaults.standard.data(forKey: notificationMessagesKey) else { return }
+        notifications = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+        sortAndLimitNotifications()
+        UserDefaults.standard.removeObject(forKey: notificationMessagesKey)
+        saveNotifications()
     }
 
     private func loadMessages() {
         if let url = messagesStoreURL(), let data = try? Data(contentsOf: url) {
             messages = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+            migrateNotificationsOutOfChatHistory()
             sortAndLimitMessages()
             return
         }
 
         guard let data = UserDefaults.standard.data(forKey: messagesKey) else { return }
         messages = (try? JSONDecoder.littleSpud.decode([LittleSpudMessage].self, from: data)) ?? []
+        migrateNotificationsOutOfChatHistory()
         sortAndLimitMessages()
         UserDefaults.standard.removeObject(forKey: messagesKey)
         saveMessages()
@@ -1685,13 +1862,47 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    private func saveNotifications() {
+        notifications = Array(notifications.suffix(120))
+        guard let data = try? JSONEncoder.littleSpud.encode(notifications), let url = notificationsStoreURL() else { return }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: [.atomic])
+            UserDefaults.standard.removeObject(forKey: notificationMessagesKey)
+        } catch {
+            print("Little Spud notification history save failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func migrateNotificationsOutOfChatHistory() {
+        let migrated = messages.filter { $0.kind == "notification" }
+        guard !migrated.isEmpty else { return }
+        messages.removeAll { $0.kind == "notification" }
+        var changed = false
+        for message in migrated {
+            changed = mergeStoredNotificationMessage(message) || changed
+        }
+        if changed {
+            sortAndLimitNotifications()
+            saveNotifications()
+        }
+        saveMessages()
+    }
+
     private func clearLocalMessages() {
         messages = []
+        notifications = []
         pendingAttachments = []
         draft = ""
         completedMessageId = nil
+        notificationUnreadCount = 0
+        activeLane = .chat
         UserDefaults.standard.removeObject(forKey: messagesKey)
+        UserDefaults.standard.removeObject(forKey: notificationMessagesKey)
         if let url = messagesStoreURL() {
+            try? FileManager.default.removeItem(at: url)
+        }
+        if let url = notificationsStoreURL() {
             try? FileManager.default.removeItem(at: url)
         }
     }
@@ -1701,5 +1912,12 @@ final class LittleSpudViewModel: ObservableObject {
         return base
             .appendingPathComponent("LittleSpud", isDirectory: true)
             .appendingPathComponent("messages-v1.json")
+    }
+
+    private func notificationsStoreURL() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        return base
+            .appendingPathComponent("LittleSpud", isDirectory: true)
+            .appendingPathComponent("notifications-v1.json")
     }
 }

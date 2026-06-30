@@ -104,13 +104,26 @@ private struct ChatView: View {
             Rectangle()
                 .fill(AppTheme.line)
                 .frame(height: 1)
-            MessageList(composerFocused: composerFocused)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    Composer(focused: $composerFocused)
-                }
+            TabView(selection: $model.activeLane) {
+                MessageList(composerFocused: composerFocused)
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        Composer(focused: $composerFocused)
+                    }
+                    .tag(LittleSpudLane.chat)
+
+                NotificationList()
+                    .tag(LittleSpudLane.notifications)
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .indexViewStyle(.page(backgroundDisplayMode: .never))
         }
         .safeAreaInset(edge: .top) {
             Color.clear.frame(height: 1)
+        }
+        .onChange(of: model.activeLane) { lane in
+            if lane == .notifications {
+                composerFocused = false
+            }
         }
     }
 }
@@ -127,25 +140,28 @@ private struct ChatHeader: View {
                 .accessibilityHidden(true)
             HeaderStatus()
             Spacer(minLength: 8)
-            Button {
-                model.toggleNotifications()
-            } label: {
-                Image(systemName: model.notificationsEnabled ? "bell.fill" : "bell")
-                    .frame(width: 36, height: 36)
+            if model.activeLane == .notifications {
+                Button {
+                    model.toggleNotifications()
+                } label: {
+                    Image(systemName: model.notificationsEnabled ? "bell.fill" : "bell")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(SecondaryIconButtonStyle(active: model.notificationsEnabled))
+                .accessibilityLabel(model.notificationsEnabled ? "Disable Notifications" : "Enable Notifications")
+                .accessibilityAddTraits(model.notificationsEnabled ? .isSelected : [])
+            } else {
+                Button {
+                    model.toggleTTS()
+                } label: {
+                    Image(systemName: model.ttsEnabled ? "speaker.wave.2.fill" : "speaker.slash")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(SecondaryIconButtonStyle(active: model.ttsEnabled))
+                .disabled(model.session == nil)
+                .accessibilityLabel(model.ttsEnabled ? "Disable TTS" : "Enable TTS")
+                .accessibilityAddTraits(model.ttsEnabled ? .isSelected : [])
             }
-            .buttonStyle(SecondaryIconButtonStyle(active: model.notificationsEnabled))
-            .accessibilityLabel("Notifications")
-
-            Button {
-                model.toggleTTS()
-            } label: {
-                Image(systemName: model.ttsEnabled ? "speaker.wave.2.fill" : "speaker.slash")
-                    .frame(width: 36, height: 36)
-            }
-            .buttonStyle(SecondaryIconButtonStyle(active: model.ttsEnabled))
-            .disabled(model.session == nil)
-            .accessibilityLabel(model.ttsEnabled ? "Disable TTS" : "Enable TTS")
-            .accessibilityAddTraits(model.ttsEnabled ? .isSelected : [])
 
             Menu {
                 Button(role: .destructive) {
@@ -255,6 +271,57 @@ private struct MessageList: View {
     }
 }
 
+private struct NotificationList: View {
+    @EnvironmentObject private var model: LittleSpudViewModel
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 14) {
+                    if model.notifications.isEmpty {
+                        EmptyNotificationsView()
+                    }
+                    ForEach(model.notifications) { message in
+                        MessageBubble(message: message, completed: false)
+                            .id(message.id)
+                    }
+                    Color.clear
+                        .frame(height: 28)
+                        .id("notification-bottom")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 18)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: model.notifications.count) { _ in
+                scrollToBottom(proxy)
+            }
+            .onAppear {
+                model.markNotificationsRead()
+                scrollToBottom(proxy, animated: false)
+            }
+        }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        let delays: [Double] = [0, 0.05, 0.18]
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let scroll = {
+                    proxy.scrollTo("notification-bottom", anchor: .bottom)
+                }
+                if animated {
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        scroll()
+                    }
+                } else {
+                    scroll()
+                }
+            }
+        }
+    }
+}
+
 private struct EmptyChatView: View {
     var body: some View {
         VStack(spacing: 12) {
@@ -264,6 +331,25 @@ private struct EmptyChatView: View {
             Text("Pocket Tater, ready.")
                 .font(.headline)
             Text("Messages from this device arrive at your Spud Hub with your Little Spud identity.")
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(AppTheme.muted)
+                .padding(.horizontal, 18)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 54)
+    }
+}
+
+private struct EmptyNotificationsView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "bell.badge")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(AppTheme.accent2)
+            Text("No notifications yet.")
+                .font(.headline)
+            Text("Little Spud alerts from Tater will collect here without mixing into chat.")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(AppTheme.muted)

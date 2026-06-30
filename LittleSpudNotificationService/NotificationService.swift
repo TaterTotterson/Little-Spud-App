@@ -40,7 +40,14 @@ final class NotificationService: UNNotificationServiceExtension {
         }
 
         guard let context = LittleSpudShared.loadNotificationContext() else { return }
-        guard let notification = await fetchNotification(context: context) else { return }
+        let eventID = notificationEventID(from: content.userInfo)
+        let notification: LittleSpudShared.ResolvedNotification?
+        if eventID.isEmpty {
+            notification = await fetchNotification(context: context, eventID: "")
+        } else {
+            notification = await fetchNotification(context: context, eventID: eventID)
+        }
+        guard let notification else { return }
 
         let cleanTitle = notification.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanMessage = notification.message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -70,10 +77,18 @@ final class NotificationService: UNNotificationServiceExtension {
         handler(content)
     }
 
-    private func fetchNotification(context: LittleSpudShared.NotificationContext) async -> LittleSpudShared.ResolvedNotification? {
+    private func fetchNotification(context: LittleSpudShared.NotificationContext, eventID: String) async -> LittleSpudShared.ResolvedNotification? {
         for baseURL in context.routeCandidates {
             guard !Task.isCancelled else { return nil }
-            guard let url = URL(string: "\(baseURL)/api/spudlink/v1/notifications/next?wait_seconds=1") else { continue }
+            guard var components = URLComponents(string: "\(baseURL)/api/spudlink/v1/notifications/next") else { continue }
+            var items = [URLQueryItem(name: "wait_seconds", value: "1")]
+            let cleanEventID = eventID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanEventID.isEmpty {
+                items.append(URLQueryItem(name: "event_id", value: cleanEventID))
+            }
+            items.append(URLQueryItem(name: "consume", value: "true"))
+            components.queryItems = items
+            guard let url = components.url else { continue }
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             request.timeoutInterval = 4
@@ -93,6 +108,29 @@ final class NotificationService: UNNotificationServiceExtension {
             }
         }
         return nil
+    }
+
+    private func notificationEventID(from userInfo: [AnyHashable: Any]) -> String {
+        for key in ["event_id", "eventId", "little_spud_event_id", "littleSpudEventId", "notification_id", "notificationId"] {
+            if let value = userInfo[key] as? String {
+                let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty { return clean }
+            } else if let value = userInfo[key] {
+                let clean = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty && clean != "<null>" { return clean }
+            }
+        }
+        if let littleSpud = userInfo["little_spud"] as? [String: Any] {
+            return notificationEventID(from: littleSpud.reduce(into: [AnyHashable: Any]()) { partial, row in
+                partial[AnyHashable(row.key)] = row.value
+            })
+        }
+        if let data = userInfo["data"] as? [String: Any] {
+            return notificationEventID(from: data.reduce(into: [AnyHashable: Any]()) { partial, row in
+                partial[AnyHashable(row.key)] = row.value
+            })
+        }
+        return ""
     }
 
     private func parseNotification(_ data: Data) -> LittleSpudShared.ResolvedNotification? {

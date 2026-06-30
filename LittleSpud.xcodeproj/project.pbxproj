@@ -25,7 +25,7 @@
 		1A0000010000000000000027 /* LittleSpudShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002B /* LittleSpudShared.swift */; };
 		1A0000010000000000000028 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002C /* NotificationService.swift */; };
 		1A0000010000000000000029 /* LittleSpudShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002B /* LittleSpudShared.swift */; };
-		1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002F /* LittleSpudNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002F /* LittleSpudNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,15 +39,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		1A0000010000000000000036 /* Embed App Extensions */ = {
+		1A0000010000000000000036 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed App Extensions */,
+				1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -157,7 +157,7 @@
 				1A0000010000000000000051 /* Sources */,
 				1A0000010000000000000021 /* Frameworks */,
 				1A0000010000000000000052 /* Resources */,
-				1A0000010000000000000036 /* Embed App Extensions */,
+				1A0000010000000000000036 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -199,7 +199,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1600;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					1A0000010000000000000041 = {
 						CreatedOnToolsVersion = 16.0;
@@ -258,6 +258,15 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1A0000010000000000000035 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000010000000000000028 /* NotificationService.swift in Sources */,
+				1A0000010000000000000029 /* LittleSpudShared.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		1A0000010000000000000051 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -276,15 +285,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		1A0000010000000000000035 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				1A0000010000000000000028 /* NotificationService.swift in Sources */,
-				1A0000010000000000000029 /* LittleSpudShared.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -294,30 +294,6 @@
 			targetProxy = 1A0000010000000000000038 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 12.14.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		1A0000010000000000000022 /* FirebaseCore */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseCore;
-		};
-		1A0000010000000000000023 /* FirebaseMessaging */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseMessaging;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		1A0000010000000000000071 /* Debug */ = {
@@ -443,17 +419,17 @@
 		1A0000010000000000000073 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				APS_ENVIRONMENT = development;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = LittleSpud/LittleSpud.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpud/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Little Spud";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios;
 				PRODUCT_NAME = LittleSpud;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -465,17 +441,17 @@
 		1A0000010000000000000074 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				APS_ENVIRONMENT = production;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = LittleSpud/LittleSpud.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpud/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Little Spud";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios;
 				PRODUCT_NAME = LittleSpud;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -490,13 +466,13 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = LittleSpudNotificationService/LittleSpudNotificationService.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 8BHV7Y2D9D;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpudNotificationService/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios.NotificationService;
 				PRODUCT_NAME = LittleSpudNotificationService;
 				SKIP_INSTALL = YES;
@@ -512,13 +488,13 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = LittleSpudNotificationService/LittleSpudNotificationService.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 8BHV7Y2D9D;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LittleSpudNotificationService/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tatertotterson.littlespud.ios.NotificationService;
 				PRODUCT_NAME = LittleSpudNotificationService;
 				SKIP_INSTALL = YES;
@@ -559,6 +535,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.14.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1A0000010000000000000022 /* FirebaseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCore;
+		};
+		1A0000010000000000000023 /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000010000000000000024 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1A0000010000000000000061 /* Project object */;
 }

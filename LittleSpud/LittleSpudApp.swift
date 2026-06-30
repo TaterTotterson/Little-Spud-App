@@ -18,6 +18,7 @@ struct LittleSpudApp: App {
                     model.start()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .littleSpudNotificationOpened)) { _ in
+                    model.showNotificationLane()
                     model.resume()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .littleSpudRemotePushReceived)) { _ in

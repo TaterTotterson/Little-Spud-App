@@ -26,6 +26,11 @@ enum LittleSpudConnectionRoute: String, Codable {
     case unknown
 }
 
+enum LittleSpudLane: String, Codable {
+    case chat
+    case notifications
+}
+
 struct LittleSpudSession: Codable, Equatable {
     var hubUrl: String
     var homeHubUrl: String

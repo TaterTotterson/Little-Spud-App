@@ -77,6 +77,7 @@ struct SpudLinkToolNotice {
 
 final class SpudLinkAPI {
     private let clientVersion = "1.0.0"
+    private let installIdAccount = "little-spud-install-id"
     private let pushGatewayRegisterURL = "https://push.taterassistant.com/little-spud/register"
     private let pushGatewaySendURL = "https://push.taterassistant.com/little-spud/send"
     private let urlSession: URLSession
@@ -94,6 +95,7 @@ final class SpudLinkAPI {
 
         let sync = try parsePairingInput(rawInput: syncInput, hubUrlInput: hubUrlInput)
         let deviceInfo = await currentDeviceInfo()
+        let installId = stableInstallId()
         let body = try jsonData([
             "pairing_code": sync.pairingCode,
             "role": "little_spud",
@@ -101,6 +103,8 @@ final class SpudLinkAPI {
             "metadata": [
                 "client": "little-spud-ios",
                 "client_version": clientVersion,
+                "app_install_id": installId,
+                "client_device_id": installId,
                 "user_name": cleanUser,
                 "device_name": cleanDevice,
                 "user_agent": "LittleSpud iOS \(deviceInfo.systemVersion)"
@@ -233,14 +237,27 @@ final class SpudLinkAPI {
         )
     }
 
-    func pollNotification(session: LittleSpudSession, waitSeconds: Int = 20) async throws -> HubNotification? {
-        let path = "/api/spudlink/v1/notifications/next?wait_seconds=\(max(1, min(waitSeconds, 60)))"
+    func pollNotification(session: LittleSpudSession, waitSeconds: Int = 20, consume: Bool = true) async throws -> HubNotification? {
+        let cleanWait = max(1, min(waitSeconds, 60))
+        let path = "/api/spudlink/v1/notifications/next?wait_seconds=\(cleanWait)&consume=\(consume ? "true" : "false")"
         let request = try authorizedRequest(session: session, path: path)
         let payload = try await fetchDictionary(request, actionLabel: "Notification poll")
         guard let notification = dict(payload["notification"]) else {
             return nil
         }
         return normalizeNotification(notification)
+    }
+
+    func acknowledgeNotification(session: LittleSpudSession, eventID: String) async throws {
+        let cleanID = eventID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanID.isEmpty else { return }
+        guard let encodedID = cleanID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), !encodedID.isEmpty else {
+            return
+        }
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/notifications/\(encodedID)/ack")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        _ = try await fetchDictionary(request, actionLabel: "Notification ack")
     }
 
     func forgetPairing(session: LittleSpudSession) async throws {
@@ -328,7 +345,8 @@ final class SpudLinkAPI {
                 "registered_at": registration.registeredAt.timeIntervalSince1970,
                 "metadata": [
                     "client": "little-spud-ios",
-                    "client_version": clientVersion
+                    "client_version": clientVersion,
+                    "app_install_id": stableInstallId()
                 ]
             ]) { _, new in new }
         }
@@ -905,6 +923,18 @@ final class SpudLinkAPI {
         await MainActor.run {
             (UIDevice.current.systemVersion, UIDevice.current.model)
         }
+    }
+
+    private func stableInstallId() -> String {
+        if let existing = try? KeychainStore.load(String.self, account: installIdAccount) {
+            let clean = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                return clean
+            }
+        }
+        let created = UUID().uuidString.lowercased()
+        try? KeychainStore.save(created, account: installIdAccount)
+        return created
     }
 }
 
