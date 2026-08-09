@@ -89,8 +89,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate {
     }
 
     private func configureFirebaseMessaging() {
-        guard Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist") != nil else {
+        guard let configPath = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist") else {
             print("Little Spud Firebase is not configured. Add GoogleService-Info.plist to enable FCM push.")
+            return
+        }
+        let config = NSDictionary(contentsOfFile: configPath)
+        guard config?["LITTLE_SPUD_FIREBASE_DISABLED"] as? Bool != true else {
+            print("Little Spud Firebase is disabled in this build.")
             return
         }
         FirebaseApp.configure()

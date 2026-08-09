@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.LittleSpud" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/spud_background</item>
+        <item name="android:statusBarColor">@color/spud_background</item>
+        <item name="android:windowBackground">@color/spud_background</item>
+    </style>
+</resources>
