@@ -29,10 +29,36 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var hubConnected = false
     @Published var pendingAttachments: [LittleSpudAttachment] = []
     @Published var notificationUnreadCount = 0
+    @Published var homeSnapshot: LittleSpudHomeSnapshot = .empty
+    @Published var homeLoading = false
+    @Published var homeError = ""
+    @Published var homeControlsInFlight: Set<String> = []
+    @Published var homeCameraSnapshots: [String: UIImage] = [:]
+    @Published var homeCameraLoading: Set<String> = []
+    @Published var homeCameraErrors: [String: String] = [:]
+    @Published var musicSnapshot: LittleSpudMusicSnapshot = .empty
+    @Published var musicLoading = false
+    @Published var musicError = ""
+    @Published var musicQuery = ""
+    @Published var selectedMusicTargetIDs: Set<String> = []
+    @Published var musicVolumePercent = 75
+    @Published var musicProgressSeconds: Double = 0
+    @Published var localMusicTrack: LittleSpudMusicTrack?
+    @Published var localMusicStatus = "idle"
+    @Published private(set) var localMusicQueue: [LittleSpudMusicTrack] = []
+    @Published private(set) var localMusicQueueIndex = -1
+    @Published private(set) var localMusicContinuationPending = false
+    @Published private(set) var localMusicRadioName = "Little Spud Continuous Radio"
+    @Published var temperatureUnitPreference: LittleSpudTemperatureUnitPreference = .automatic
+    @Published private(set) var temperatureRoomLocationOverrides: [String: LittleSpudTemperatureRoomLocation] = [:]
     @Published var activeLane: LittleSpudLane = .chat {
         didSet {
             if activeLane == .notifications {
                 markNotificationsRead()
+            } else if activeLane == .home {
+                refreshHome()
+            } else if activeLane == .music {
+                refreshMusic()
             }
         }
     }
@@ -66,6 +92,72 @@ final class LittleSpudViewModel: ObservableObject {
 
     var canUseVoiceInput: Bool {
         session != nil
+    }
+
+    var selectedMusicTargets: [LittleSpudMusicTarget] {
+        musicSnapshot.targets.filter { selectedMusicTargetIDs.contains($0.id) }
+    }
+
+    var selectedMusicTarget: LittleSpudMusicTarget? {
+        selectedMusicTargets.first
+    }
+
+    var usesLocalMusicPlayback: Bool {
+        selectedMusicTargets.contains { $0.isLocal }
+    }
+
+    var musicTargetSummary: String {
+        let targets = selectedMusicTargets
+        if targets.isEmpty { return "Choose players" }
+        if targets.count == 1 { return targets[0].label }
+        return "\(targets.count) players"
+    }
+
+    var musicCurrentTrack: LittleSpudMusicTrack? {
+        usesLocalMusicPlayback
+            ? localMusicTrack
+            : musicSnapshot.player.current
+    }
+
+    var musicPlaybackStatus: String {
+        usesLocalMusicPlayback
+            ? localMusicStatus
+            : musicSnapshot.player.status
+    }
+
+    var musicQueue: [LittleSpudMusicTrack] {
+        if usesLocalMusicPlayback {
+            return localMusicQueue.isEmpty ? musicSnapshot.tracks : localMusicQueue
+        }
+        return musicSnapshot.player.queue
+    }
+
+    var musicQueueIndex: Int {
+        usesLocalMusicPlayback ? localMusicQueueIndex : musicSnapshot.player.queueIndex
+    }
+
+    var musicContinuousRadio: Bool {
+        usesLocalMusicPlayback || musicSnapshot.player.continuousRadio
+    }
+
+    var musicRadioName: String {
+        usesLocalMusicPlayback
+            ? localMusicRadioName
+            : musicSnapshot.player.radioName
+    }
+
+    var musicDurationSeconds: Double {
+        if usesLocalMusicPlayback {
+            return localMusicTrack?.durationSeconds ?? 0
+        }
+        return max(
+            musicSnapshot.player.durationSeconds,
+            musicCurrentTrack?.durationSeconds ?? 0
+        )
+    }
+
+    var musicProviderLabel: String {
+        musicSnapshot.provider?.label ?? "Music Core"
     }
 
     var connectedTitle: String {
@@ -103,6 +195,8 @@ final class LittleSpudViewModel: ObservableObject {
     private let remotePushRegistrationAccount = "little-spud-remote-push-registration"
     private let legacyRemotePushRegistrationKey = "little-spud-ios:remote-push-registration"
     private let ttsKey = "little-spud-ios:tts-enabled"
+    private let temperatureUnitPreferenceKey = "little-spud-ios:temperature-unit"
+    private let temperatureRoomLocationsKey = "little-spud-ios:temperature-room-locations"
     private let demoHubUrl = "demo://little-spud"
     private let demoToken = "little-spud-demo-token"
     private var didStart = false
@@ -119,14 +213,37 @@ final class LittleSpudViewModel: ObservableObject {
     private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
     private var backgroundGraceTask: Task<Void, Never>?
     private var pushRegistrationTask: Task<Void, Never>?
+    private var pushRegistrationGeneration = 0
+    private var pushRegistrationFingerprintInFlight = ""
     private var remotePushRegistrationUnsupported = false
     private var pendingNotificationAckIDs: Set<String> = []
+    private var lastStreamHapticByMessageId: [String: Date] = [:]
+    private var homeTask: Task<Void, Never>?
+    private var musicTask: Task<Void, Never>?
+    private var musicProgressTask: Task<Void, Never>?
+    private var localMusicContinuationTask: Task<Void, Never>?
+    private var localMusicQueueSessionID = ""
+    private var localMusicPlayer: AVPlayer?
+    private var localMusicFinishedObserver: NSObjectProtocol?
 
     func start() {
         guard !didStart else { return }
         didStart = true
         notificationsEnabled = UserDefaults.standard.bool(forKey: notificationsKey)
         ttsEnabled = UserDefaults.standard.bool(forKey: ttsKey)
+        temperatureUnitPreference = LittleSpudTemperatureUnitPreference(
+            rawValue: UserDefaults.standard.string(forKey: temperatureUnitPreferenceKey) ?? ""
+        ) ?? .automatic
+        let savedTemperatureRoomLocations = UserDefaults.standard.dictionary(
+            forKey: temperatureRoomLocationsKey
+        ) as? [String: String] ?? [:]
+        temperatureRoomLocationOverrides = savedTemperatureRoomLocations.reduce(into: [:]) {
+            result,
+            item in
+            if let location = LittleSpudTemperatureRoomLocation(rawValue: item.value) {
+                result[item.key] = location
+            }
+        }
         ttsStatus = ttsEnabled ? "TTS on" : ""
         loadSession()
         loadNotifications()
@@ -154,6 +271,11 @@ final class LittleSpudViewModel: ObservableObject {
         endBackgroundGracePeriod()
         if isDemoMode {
             hubConnected = true
+            if activeLane == .home {
+                refreshHome()
+            } else if activeLane == .music {
+                refreshMusic()
+            }
             return
         }
         importSharedResolvedNotifications()
@@ -269,6 +391,14 @@ final class LittleSpudViewModel: ObservableObject {
                 kind: nil
             )
         ]
+        homeSnapshot = demoHomeSnapshot()
+        homeError = ""
+        homeCameraSnapshots = [:]
+        homeCameraLoading = []
+        homeCameraErrors = [:]
+        musicSnapshot = demoMusicSnapshot()
+        selectedMusicTargetIDs = Set(musicSnapshot.targets.prefix(1).map(\.id))
+        musicError = ""
         saveSession()
         saveMessages()
         UserDefaults.standard.set(userName, forKey: "little-spud-ios:user-name")
@@ -349,22 +479,34 @@ final class LittleSpudViewModel: ObservableObject {
                 hubConnected = true
                 saveSession()
 
-                let response = try await api.sendChat(session: chatSession, messages: priorMessages, text: text, attachments: outgoingAttachments) { notice in
-                    Task { @MainActor [weak self] in
-                        self?.appendToolNotice(notice, beforeAssistantId: assistantId)
+                let response = try await api.sendChat(
+                    session: chatSession,
+                    messages: priorMessages,
+                    text: text,
+                    attachments: outgoingAttachments,
+                    onToolNotice: { notice in
+                        Task { @MainActor [weak self] in
+                            self?.appendToolNotice(notice, beforeAssistantId: assistantId)
+                        }
+                    },
+                    onResponseChunk: { [weak self] chunk in
+                        self?.appendAssistantResponseChunk(
+                            id: assistantId,
+                            chunk: chunk
+                        )
                     }
-                }
+                )
                 let reply = response.content
                 guard !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !response.attachments.isEmpty else {
                     throw SpudLinkAPIError.message("Tater returned no message content.")
                 }
                 if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
-                    messages[messageIndex].content = ""
+                    messages[messageIndex].content = reply
                     messages[messageIndex].kind = nil
                     messages[messageIndex].attachments = response.attachments
                 }
                 let ttsTask = await beginSpeechPlayback(reply, waitForStart: true)
-                await revealAssistantMessage(id: assistantId, text: reply)
+                await completeAssistantResponse(id: assistantId)
                 await refreshFromHub(showStatus: false)
                 if fromVoice && response.reopenMic {
                     if let ttsTask {
@@ -381,6 +523,7 @@ final class LittleSpudViewModel: ObservableObject {
                     return
                 }
                 let errorMessage = "Request failed: \(error.localizedDescription)"
+                lastStreamHapticByMessageId.removeValue(forKey: assistantId)
                 if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
                     messages[messageIndex] = LittleSpudMessage(
                         id: assistantId,
@@ -587,6 +730,41 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    func setTemperatureUnitPreference(_ preference: LittleSpudTemperatureUnitPreference) {
+        temperatureUnitPreference = preference
+        UserDefaults.standard.set(preference.rawValue, forKey: temperatureUnitPreferenceKey)
+    }
+
+    var temperatureRooms: [LittleSpudHomeRoom] {
+        homeRooms.filter { room in
+            room.categories.contains { ["temperature", "climate"].contains($0.id) }
+        }
+    }
+
+    func temperatureRoomLocation(
+        for room: LittleSpudHomeRoom
+    ) -> LittleSpudTemperatureRoomLocation {
+        temperatureRoomLocationOverrides[room.id]
+            ?? Self.suggestedTemperatureRoomLocation(name: room.name)
+    }
+
+    func hasTemperatureRoomLocationOverride(roomID: String) -> Bool {
+        temperatureRoomLocationOverrides[roomID] != nil
+    }
+
+    func setTemperatureRoomLocation(
+        _ location: LittleSpudTemperatureRoomLocation,
+        roomID: String
+    ) {
+        temperatureRoomLocationOverrides[roomID] = location
+        persistTemperatureRoomLocations()
+    }
+
+    func resetTemperatureRoomLocations() {
+        temperatureRoomLocationOverrides = [:]
+        UserDefaults.standard.removeObject(forKey: temperatureRoomLocationsKey)
+    }
+
     func showChatLane() {
         activeLane = .chat
     }
@@ -595,8 +773,1099 @@ final class LittleSpudViewModel: ObservableObject {
         activeLane = .notifications
     }
 
+    func showHomeLane() {
+        activeLane = .home
+    }
+
+    func showMusicLane() {
+        activeLane = .music
+    }
+
     func toggleNotificationLane() {
         activeLane = activeLane == .notifications ? .chat : .notifications
+    }
+
+    var homeRooms: [LittleSpudHomeRoom] {
+        homeSnapshot.rooms
+    }
+
+    func homeRoom(id: String) -> LittleSpudHomeRoom? {
+        homeSnapshot.rooms.first { $0.id == id }
+    }
+
+    private func persistTemperatureRoomLocations() {
+        let values = temperatureRoomLocationOverrides.mapValues(\.rawValue)
+        UserDefaults.standard.set(values, forKey: temperatureRoomLocationsKey)
+    }
+
+    private static func suggestedTemperatureRoomLocation(
+        name: String
+    ) -> LittleSpudTemperatureRoomLocation {
+        let normalized = name
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        let outdoorNames = [
+            "outside",
+            "outdoor",
+            "backyard",
+            "back yard",
+            "front yard",
+            "side yard",
+            "yard",
+            "patio",
+            "porch",
+            "deck",
+            "balcony",
+            "garden",
+            "greenhouse",
+            "pool",
+            "driveway",
+            "carport",
+            "front door",
+            "back door",
+            "shed",
+            "weather",
+        ]
+        return outdoorNames.contains(where: normalized.contains)
+            ? .outdoor
+            : .indoor
+    }
+
+    func isHomeControlInFlight(roomID: String, categoryID: String) -> Bool {
+        homeControlsInFlight.contains(homeControlKey(roomID: roomID, categoryID: categoryID))
+    }
+
+    func homeCameraSnapshot(roomID: String, cameraID: String) -> UIImage? {
+        homeCameraSnapshots[homeCameraKey(roomID: roomID, cameraID: cameraID)]
+    }
+
+    func isHomeCameraLoading(roomID: String, cameraID: String) -> Bool {
+        homeCameraLoading.contains(homeCameraKey(roomID: roomID, cameraID: cameraID))
+    }
+
+    func homeCameraError(roomID: String, cameraID: String) -> String {
+        homeCameraErrors[homeCameraKey(roomID: roomID, cameraID: cameraID)] ?? ""
+    }
+
+    func refreshHomeCameraSnapshot(roomID: String, cameraID: String) async {
+        guard UIApplication.shared.applicationState == .active else { return }
+        guard let currentSession = session, !currentSession.isDemo else { return }
+        let key = homeCameraKey(roomID: roomID, cameraID: cameraID)
+        guard !homeCameraLoading.contains(key) else { return }
+        homeCameraLoading.insert(key)
+        defer {
+            homeCameraLoading.remove(key)
+        }
+        do {
+            let data = try await api.fetchHomeCameraSnapshot(
+                session: currentSession,
+                roomID: roomID,
+                cameraID: cameraID
+            )
+            guard !Task.isCancelled else { return }
+            guard let image = UIImage(data: data) else {
+                throw SpudLinkAPIError.message("Camera snapshot failed: Tater returned an unsupported image.")
+            }
+            homeCameraSnapshots[key] = image
+            homeCameraErrors.removeValue(forKey: key)
+        } catch {
+            guard !Task.isCancelled, !isExpectedCancellation(error) else { return }
+            homeCameraErrors[key] = error.localizedDescription
+        }
+    }
+
+    func refreshMusic(force: Bool = false, query: String? = nil, limit: Int? = nil) {
+        guard let currentSession = session else { return }
+        if currentSession.isDemo {
+            musicSnapshot = demoMusicSnapshot(query: query ?? musicQuery)
+            ensureMusicTargetSelection()
+            syncMusicProgress()
+            musicError = ""
+            musicLoading = false
+            return
+        }
+        musicTask?.cancel()
+        musicLoading = true
+        if force {
+            musicError = ""
+        }
+        let search = (query ?? musicQuery)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        musicTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.musicLoading = false
+                self.musicTask = nil
+            }
+            do {
+                let snapshot = try await api.fetchMusic(
+                    session: currentSession,
+                    query: search,
+                    refresh: force,
+                    limit: limit
+                )
+                guard !Task.isCancelled else { return }
+                musicSnapshot = snapshot
+                if musicVolumePercent == 75 {
+                    musicVolumePercent = snapshot.player.volumePercent
+                }
+                ensureMusicTargetSelection()
+                syncMusicProgress()
+                musicError = snapshot.provider?.connected == false
+                    ? "Connect \(snapshot.provider?.label ?? "the active provider") in Music Core."
+                    : ""
+            } catch {
+                guard !Task.isCancelled, !isExpectedCancellation(error) else { return }
+                if (error as? SpudLinkAPIError)?.statusCode == 404 {
+                    musicError = "Install Music Core 2.0 or newer from Tater Shop."
+                } else if (error as? SpudLinkAPIError)?.statusCode == 409 {
+                    musicError = "Start Music Core in Tater before using this player."
+                } else {
+                    musicError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func searchMusic() {
+        refreshMusic(query: musicQuery)
+    }
+
+    func toggleMusicTarget(_ targetID: String) {
+        guard let target = musicSnapshot.targets.first(where: { $0.id == targetID }) else {
+            return
+        }
+        if target.isLocal {
+            selectedMusicTargetIDs = [targetID]
+            localMusicPlayer?.volume = Float(musicVolumePercent) / 100
+            return
+        }
+        if usesLocalMusicPlayback, localMusicPlayer != nil {
+            stopLocalMusic(clearTrack: true)
+        }
+        selectedMusicTargetIDs = Set(selectedMusicTargetIDs.filter { id in
+            musicSnapshot.targets.first(where: { $0.id == id })?.isLocal != true
+        })
+        if selectedMusicTargetIDs.contains(targetID) {
+            if selectedMusicTargetIDs.count > 1 {
+                selectedMusicTargetIDs.remove(targetID)
+            }
+        } else {
+            selectedMusicTargetIDs.insert(targetID)
+        }
+    }
+
+    func setMusicVolume(_ value: Double) {
+        musicVolumePercent = max(0, min(100, Int(value.rounded())))
+        localMusicPlayer?.volume = Float(musicVolumePercent) / 100
+    }
+
+    func commitMusicVolume() {
+        guard !usesLocalMusicPlayback else { return }
+        if session?.isDemo == true {
+            musicSnapshot.player.volumePercent = musicVolumePercent
+            return
+        }
+        runRemoteMusicAction("set_volume")
+    }
+
+    func playMusic(_ track: LittleSpudMusicTrack) {
+        guard let currentSession = session else { return }
+        ensureMusicTargetSelection()
+        guard !selectedMusicTargets.isEmpty else {
+            musicError = "Choose where the music should play."
+            return
+        }
+        if usesLocalMusicPlayback {
+            startLocalMusicQueue([track], at: 0)
+            playMusicLocally(track, session: currentSession)
+            return
+        }
+        if localMusicPlayer != nil {
+            stopLocalMusic(clearTrack: true)
+        }
+        let targetIDs = selectedMusicTargets.map(\.id)
+        guard !currentSession.isDemo else {
+            musicSnapshot.player.current = track
+            musicSnapshot.player.status = "playing"
+            musicSnapshot.player.targets = targetIDs
+            musicSnapshot.player.queue = musicSnapshot.tracks
+            musicSnapshot.player.queueCount = musicSnapshot.tracks.count
+            musicSnapshot.player.queueIndex = musicSnapshot.tracks.firstIndex(of: track) ?? 0
+            musicSnapshot.player.durationSeconds = track.durationSeconds
+            musicSnapshot.player.positionSeconds = 0
+            syncMusicProgress()
+            musicError = ""
+            HapticManager.shared.play("messageComplete")
+            return
+        }
+        runRemoteMusicAction("play", trackID: track.id)
+    }
+
+    func playMusicAlbum(_ tracks: [LittleSpudMusicTrack]) {
+        var seen = Set<String>()
+        let queue = tracks.filter { track in
+            !track.id.isEmpty && seen.insert(track.id).inserted
+        }
+        guard let first = queue.first, let currentSession = session else { return }
+        ensureMusicTargetSelection()
+        guard !selectedMusicTargets.isEmpty else {
+            musicError = "Choose where the music should play."
+            return
+        }
+        if usesLocalMusicPlayback {
+            startLocalMusicQueue(queue, at: 0)
+            localMusicRadioName = first.album.isEmpty ? "Album" : first.album
+            playMusicLocally(first, session: currentSession)
+            return
+        }
+        if localMusicPlayer != nil {
+            stopLocalMusic(clearTrack: true)
+        }
+        let targetIDs = selectedMusicTargets.map(\.id)
+        guard !currentSession.isDemo else {
+            musicSnapshot.player.current = first
+            musicSnapshot.player.status = "playing"
+            musicSnapshot.player.targets = targetIDs
+            musicSnapshot.player.queue = queue
+            musicSnapshot.player.queueCount = queue.count
+            musicSnapshot.player.queueIndex = 0
+            musicSnapshot.player.radioName = first.album
+            musicSnapshot.player.durationSeconds = first.durationSeconds
+            musicSnapshot.player.positionSeconds = 0
+            syncMusicProgress()
+            musicError = ""
+            HapticManager.shared.play("messageComplete")
+            return
+        }
+        runRemoteMusicAction("play_queue", trackIDs: queue.map(\.id))
+    }
+
+    func playMusicRecommendation(_ recommendation: LittleSpudMusicRecommendation) {
+        guard let currentSession = session else { return }
+        ensureMusicTargetSelection()
+        guard !selectedMusicTargets.isEmpty else {
+            musicError = "Choose where the music should play."
+            return
+        }
+        if usesLocalMusicPlayback {
+            guard let first = recommendation.tracks.first else { return }
+            startLocalMusicQueue(recommendation.tracks, at: 0)
+            localMusicRadioName = recommendation.name
+            playMusicLocally(first, session: currentSession)
+            return
+        }
+        guard !currentSession.isDemo else {
+            guard let first = recommendation.tracks.first else { return }
+            musicSnapshot.player.current = first
+            musicSnapshot.player.status = "playing"
+            musicSnapshot.player.targets = selectedMusicTargets.map(\.id)
+            musicSnapshot.player.queue = recommendation.tracks
+            musicSnapshot.player.queueCount = recommendation.tracks.count
+            musicSnapshot.player.queueIndex = 0
+            musicSnapshot.player.radioName = recommendation.name
+            musicSnapshot.player.durationSeconds = first.durationSeconds
+            musicSnapshot.player.positionSeconds = 0
+            syncMusicProgress()
+            return
+        }
+        runRemoteMusicAction(
+            "play_recommendation",
+            recommendationID: recommendation.id
+        )
+    }
+
+    func browseMusic(_ value: String) {
+        musicQuery = value
+        refreshMusic(query: value, limit: 200)
+    }
+
+    func clearMusicBrowse() {
+        musicQuery = ""
+        refreshMusic(query: "")
+    }
+
+    func toggleMusicPlayback() {
+        if usesLocalMusicPlayback {
+            guard let player = localMusicPlayer else {
+                if let track = localMusicTrack ?? musicSnapshot.tracks.first {
+                    playMusic(track)
+                }
+                return
+            }
+            if localMusicStatus == "playing" {
+                player.pause()
+                localMusicStatus = "paused"
+            } else {
+                player.play()
+                localMusicStatus = "playing"
+            }
+            syncMusicProgress()
+            return
+        }
+        let status = musicPlaybackStatus.lowercased()
+        if session?.isDemo == true {
+            musicSnapshot.player.status = status == "playing" ? "paused" : "playing"
+            syncMusicProgress()
+            return
+        }
+        switch status {
+        case "playing":
+            runRemoteMusicAction("pause")
+        case "paused":
+            runRemoteMusicAction("resume")
+        default:
+            runRemoteMusicAction("replay")
+        }
+    }
+
+    func stopMusic() {
+        if usesLocalMusicPlayback {
+            localMusicContinuationTask?.cancel()
+            localMusicContinuationTask = nil
+            localMusicContinuationPending = false
+            stopLocalMusic()
+            syncMusicProgress()
+        } else {
+            runRemoteMusicAction("stop")
+        }
+    }
+
+    func skipMusic(_ direction: Int) {
+        if usesLocalMusicPlayback {
+            let queue = musicQueue
+            guard !queue.isEmpty, let currentSession = session else { return }
+            let currentIndex = queue.indices.contains(localMusicQueueIndex)
+                ? localMusicQueueIndex
+                : queue.firstIndex { $0.id == localMusicTrack?.id }
+                    ?? (direction > 0 ? -1 : 0)
+            localMusicQueueIndex = (
+                currentIndex + (direction >= 0 ? 1 : -1) + queue.count
+            ) % queue.count
+            playMusicLocally(queue[localMusicQueueIndex], session: currentSession)
+        } else {
+            runRemoteMusicAction(direction >= 0 ? "next" : "previous")
+        }
+    }
+
+    func seekMusic(to value: Double) {
+        let position = max(0, min(musicDurationSeconds, value))
+        musicProgressSeconds = position
+        if usesLocalMusicPlayback {
+            localMusicPlayer?.seek(
+                to: CMTime(seconds: position, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            return
+        }
+        if session?.isDemo == true {
+            musicSnapshot.player.positionSeconds = position
+            syncMusicProgress()
+            return
+        }
+        runRemoteMusicAction("seek", positionSeconds: position)
+    }
+
+    private func runRemoteMusicAction(
+        _ action: String,
+        trackID: String = "",
+        trackIDs: [String] = [],
+        recommendationID: String = "",
+        positionSeconds: Double? = nil
+    ) {
+        guard let currentSession = session, !currentSession.isDemo else { return }
+        guard !musicLoading else { return }
+        musicLoading = true
+        musicError = ""
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.musicLoading = false }
+            do {
+                let snapshot = try await api.controlMusic(
+                    session: currentSession,
+                    action: action,
+                    trackID: trackID,
+                    trackIDs: trackIDs,
+                    recommendationID: recommendationID,
+                    targets: selectedMusicTargets.map(\.id),
+                    provider: musicSnapshot.provider?.id ?? "",
+                    volumePercent: musicVolumePercent,
+                    positionSeconds: positionSeconds
+                )
+                musicSnapshot = snapshot
+                ensureMusicTargetSelection()
+                syncMusicProgress()
+                HapticManager.shared.play("messageComplete")
+            } catch {
+                musicError = error.localizedDescription
+            }
+        }
+    }
+
+    private func playMusicLocally(
+        _ track: LittleSpudMusicTrack,
+        session currentSession: LittleSpudSession
+    ) {
+        guard !currentSession.isDemo else {
+            localMusicTrack = track
+            localMusicStatus = "playing"
+            musicProgressSeconds = 0
+            syncMusicProgress()
+            scheduleLocalMusicContinuationIfNeeded(session: currentSession)
+            musicError = ""
+            HapticManager.shared.play("messageComplete")
+            return
+        }
+        do {
+            let streamURL = try api.musicStreamURL(
+                session: currentSession,
+                track: track
+            )
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default)
+            try audioSession.setActive(true)
+            stopLocalMusic(clearTrack: false)
+            let item = AVPlayerItem(url: streamURL)
+            let player = AVPlayer(playerItem: item)
+            player.volume = Float(musicVolumePercent) / 100
+            localMusicPlayer = player
+            localMusicTrack = track
+            localMusicStatus = "playing"
+            musicProgressSeconds = 0
+            localMusicFinishedObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.localMusicStatus = "finished"
+                    self.skipMusic(1)
+                }
+            }
+            player.play()
+            syncMusicProgress()
+            reportLocalMusicStarted(track, session: currentSession)
+            scheduleLocalMusicContinuationIfNeeded(session: currentSession)
+            musicError = ""
+            HapticManager.shared.play("messageComplete")
+        } catch {
+            localMusicStatus = "error"
+            musicError = error.localizedDescription
+        }
+    }
+
+    private func stopLocalMusic(clearTrack: Bool = false) {
+        localMusicPlayer?.pause()
+        localMusicPlayer = nil
+        if let observer = localMusicFinishedObserver {
+            NotificationCenter.default.removeObserver(observer)
+            localMusicFinishedObserver = nil
+        }
+        localMusicStatus = "stopped"
+        musicProgressTask?.cancel()
+        musicProgressTask = nil
+        musicProgressSeconds = 0
+        if clearTrack {
+            localMusicContinuationTask?.cancel()
+            localMusicContinuationTask = nil
+            localMusicContinuationPending = false
+            localMusicTrack = nil
+            localMusicQueue = []
+            localMusicQueueIndex = -1
+            localMusicQueueSessionID = ""
+            localMusicRadioName = "Little Spud Continuous Radio"
+        }
+    }
+
+    private func startLocalMusicQueue(
+        _ tracks: [LittleSpudMusicTrack],
+        at index: Int
+    ) {
+        localMusicContinuationTask?.cancel()
+        localMusicContinuationTask = nil
+        localMusicContinuationPending = false
+        localMusicQueue = tracks
+        localMusicQueueIndex = tracks.isEmpty
+            ? -1
+            : max(0, min(index, tracks.count - 1))
+        localMusicQueueSessionID = UUID().uuidString
+        localMusicRadioName = "Little Spud Continuous Radio"
+    }
+
+    private func reportLocalMusicStarted(
+        _ track: LittleSpudMusicTrack,
+        session currentSession: LittleSpudSession
+    ) {
+        guard !currentSession.isDemo else { return }
+        Task { [api] in
+            try? await api.reportLocalMusicStarted(
+                session: currentSession,
+                provider: track.provider,
+                trackID: track.id
+            )
+        }
+    }
+
+    private func scheduleLocalMusicContinuationIfNeeded(
+        session currentSession: LittleSpudSession
+    ) {
+        guard usesLocalMusicPlayback, !localMusicQueue.isEmpty else { return }
+        let remaining = max(0, localMusicQueue.count - localMusicQueueIndex - 1)
+        guard remaining <= 2, localMusicContinuationTask == nil else { return }
+
+        if currentSession.isDemo {
+            let demoTracks = musicSnapshot.tracks.filter { candidate in
+                !localMusicQueue.contains(where: { $0.id == candidate.id })
+            }
+            localMusicQueue.append(contentsOf: demoTracks.isEmpty ? musicSnapshot.tracks : demoTracks)
+            return
+        }
+
+        if localMusicQueueIndex > 30 {
+            let trimCount = localMusicQueueIndex - 2
+            localMusicQueue.removeFirst(trimCount)
+            localMusicQueueIndex -= trimCount
+        }
+        let sessionID = localMusicQueueSessionID
+        let queueIDs = localMusicQueue.map(\.id)
+        let currentTrackID = localMusicTrack?.id
+            ?? localMusicQueue[max(0, localMusicQueueIndex)].id
+        let provider = localMusicTrack?.provider
+            ?? musicSnapshot.provider?.id
+            ?? ""
+        let index = max(0, localMusicQueueIndex)
+        localMusicContinuationPending = true
+        localMusicContinuationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let continuation = try await api.fetchLocalMusicContinuation(
+                    session: currentSession,
+                    provider: provider,
+                    trackIDs: queueIDs,
+                    currentTrackID: currentTrackID,
+                    queueIndex: index,
+                    queueSessionID: sessionID
+                )
+                guard !Task.isCancelled, localMusicQueueSessionID == sessionID else { return }
+                let existing = Set(localMusicQueue.map(\.id))
+                let uniqueTracks = continuation.tracks.filter { !existing.contains($0.id) }
+                localMusicQueue.append(
+                    contentsOf: uniqueTracks.isEmpty ? continuation.tracks : uniqueTracks
+                )
+                if !continuation.stationName.isEmpty {
+                    localMusicRadioName = continuation.stationName
+                }
+                if musicError.hasPrefix("Continuous radio will retry:") {
+                    musicError = ""
+                }
+            } catch {
+                guard !Task.isCancelled, localMusicQueueSessionID == sessionID else { return }
+                musicError = "Continuous radio will retry: \(error.localizedDescription)"
+            }
+            guard localMusicQueueSessionID == sessionID else { return }
+            localMusicContinuationPending = false
+            localMusicContinuationTask = nil
+        }
+    }
+
+    private func ensureMusicTargetSelection() {
+        let available = Set(musicSnapshot.targets.map(\.id))
+        selectedMusicTargetIDs = selectedMusicTargetIDs.intersection(available)
+        if !selectedMusicTargetIDs.isEmpty {
+            return
+        }
+        let serverTargets = musicSnapshot.player.targets.filter { available.contains($0) }
+        if !serverTargets.isEmpty {
+            selectedMusicTargetIDs = Set(serverTargets)
+            return
+        }
+        if let local = musicSnapshot.targets.first(where: { $0.isLocal }) {
+            selectedMusicTargetIDs = [local.id]
+        } else if let first = musicSnapshot.targets.first {
+            selectedMusicTargetIDs = [first.id]
+        }
+    }
+
+    private func syncMusicProgress() {
+        musicProgressTask?.cancel()
+        musicProgressTask = nil
+        let localPosition = localMusicPlayer?.currentTime().seconds ?? 0
+        musicProgressSeconds = usesLocalMusicPlayback
+            ? (localPosition.isFinite ? max(0, localPosition) : 0)
+            : max(0, musicSnapshot.player.positionSeconds)
+        guard musicPlaybackStatus == "playing" else { return }
+        musicProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                let duration = self.musicDurationSeconds
+                if self.usesLocalMusicPlayback,
+                   let seconds = self.localMusicPlayer?.currentTime().seconds,
+                   seconds.isFinite {
+                    self.musicProgressSeconds = max(0, min(duration, seconds))
+                } else {
+                    self.musicProgressSeconds = min(
+                        duration > 0 ? duration : .greatestFiniteMagnitude,
+                        self.musicProgressSeconds + 1
+                    )
+                    if duration > 0, self.musicProgressSeconds >= duration {
+                        self.refreshMusic()
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    func musicArtworkURL(for track: LittleSpudMusicTrack?) -> URL? {
+        guard let track else { return nil }
+        return resolveMusicArtworkURL(track.artworkURL)
+    }
+
+    func musicArtworkURL(for recommendation: LittleSpudMusicRecommendation) -> URL? {
+        let artwork = recommendation.artworkURL.isEmpty
+            ? recommendation.tracks.first?.artworkURL ?? ""
+            : recommendation.artworkURL
+        return resolveMusicArtworkURL(artwork)
+    }
+
+    private func resolveMusicArtworkURL(_ rawValue: String) -> URL? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.lowercased().hasPrefix("data:") else { return nil }
+        if let absolute = URL(string: value), absolute.scheme != nil {
+            return absolute
+        }
+        guard let baseValue = session?.hubUrl, let base = URL(string: baseValue) else {
+            return nil
+        }
+        return URL(string: value, relativeTo: base)?.absoluteURL
+    }
+
+    func refreshHome(force: Bool = false) {
+        guard let currentSession = session else { return }
+        if currentSession.isDemo {
+            homeSnapshot = demoHomeSnapshot()
+            homeError = ""
+            homeLoading = false
+            return
+        }
+        if homeTask != nil {
+            return
+        }
+        homeLoading = true
+        if force {
+            homeError = ""
+        }
+        homeTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.homeLoading = false
+                self.homeTask = nil
+            }
+            do {
+                let snapshot = try await api.fetchHome(session: currentSession, refresh: force)
+                guard !Task.isCancelled else { return }
+                homeSnapshot = snapshot
+                pruneHomeCameraCache(for: snapshot)
+                homeError = ""
+            } catch {
+                guard !Task.isCancelled else { return }
+                if (error as? SpudLinkAPIError)?.statusCode == 404 {
+                    homeError = "Update Tater to use Little Spud Home controls."
+                } else {
+                    homeError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func toggleHomePower(roomID: String, category: LittleSpudHomeCategory) {
+        let action = ["on", "mixed"].contains(category.state) ? "turn_off" : "turn_on"
+        performHomeAction(roomID: roomID, category: category, action: action)
+    }
+
+    func performHomeAction(
+        roomID: String,
+        category: LittleSpudHomeCategory,
+        action: String,
+        value: Double? = nil,
+        mode: String? = nil,
+        temperatureUnit: String? = nil
+    ) {
+        guard let currentSession = session else { return }
+        guard category.supports(action) else {
+            homeError = "\(category.name) do not support that control."
+            return
+        }
+        let controlKey = homeControlKey(roomID: roomID, categoryID: category.id)
+        guard !homeControlsInFlight.contains(controlKey) else { return }
+        if currentSession.isDemo {
+            applyDemoHomeAction(
+                roomID: roomID,
+                categoryID: category.id,
+                action: action,
+                value: value,
+                mode: mode,
+                temperatureUnit: temperatureUnit
+            )
+            return
+        }
+
+        homeControlsInFlight.insert(controlKey)
+        homeError = ""
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.homeControlsInFlight.remove(controlKey)
+            }
+            do {
+                let snapshot = try await api.controlHomeCategory(
+                    session: currentSession,
+                    roomID: roomID,
+                    categoryID: category.id,
+                    action: action,
+                    value: value,
+                    mode: mode,
+                    temperatureUnit: temperatureUnit
+                )
+                homeSnapshot = snapshot
+                pruneHomeCameraCache(for: snapshot)
+                HapticManager.shared.play("messageComplete")
+            } catch {
+                homeError = error.localizedDescription
+            }
+        }
+    }
+
+    private func homeControlKey(roomID: String, categoryID: String) -> String {
+        "\(roomID)|\(categoryID)"
+    }
+
+    private func homeCameraKey(roomID: String, cameraID: String) -> String {
+        "\(roomID)|\(cameraID)"
+    }
+
+    private func pruneHomeCameraCache(for snapshot: LittleSpudHomeSnapshot) {
+        let validKeys = Set(
+            snapshot.rooms.flatMap { room in
+                (room.cameras?.cameraPreviews ?? []).map {
+                    homeCameraKey(roomID: room.id, cameraID: $0.id)
+                }
+            }
+        )
+        homeCameraSnapshots = homeCameraSnapshots.filter { validKeys.contains($0.key) }
+        homeCameraErrors = homeCameraErrors.filter { validKeys.contains($0.key) }
+        homeCameraLoading = homeCameraLoading.intersection(validKeys)
+    }
+
+    private func demoHomeSnapshot() -> LittleSpudHomeSnapshot {
+        LittleSpudHomeSnapshot(
+            rooms: [
+                LittleSpudHomeRoom(
+                    id: "office",
+                    name: "Office",
+                    deviceCount: 5,
+                    summary: ["All 2 lights on", "Fan on"],
+                    categories: [
+                        LittleSpudHomeCategory(
+                            id: "light", name: "Lights", count: 2, state: "on", summary: "2 of 2 on",
+                            controlType: "light", availableActions: ["turn_on", "turn_off", "set_brightness"],
+                            controllable: true, readOnly: false, supportsBrightness: true, brightness: 68
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "fan", name: "Fans", count: 1, state: "on", summary: "On",
+                            controlType: "power", availableActions: ["turn_on", "turn_off"],
+                            controllable: true, readOnly: false, supportsBrightness: false, brightness: nil
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "climate", name: "Climate", count: 1, state: "heat", summary: "72°F · Heat",
+                            controlType: "thermostat", availableActions: ["set_temperature", "set_hvac_mode"],
+                            controllable: true, readOnly: false, supportsBrightness: false, brightness: nil,
+                            currentTemperature: 72, targetTemperature: 70, temperatureUnit: "F",
+                            hvacMode: "heat", availableHVACModes: ["off", "heat", "cool", "auto"],
+                            minimumTemperature: 45, maximumTemperature: 90, temperatureStep: 1
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "temperature", name: "Temperature", count: 1, state: "72_f", summary: "72°F",
+                            controlType: "read_only", availableActions: [],
+                            controllable: false, readOnly: true, supportsBrightness: false, brightness: nil
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "humidity", name: "Humidity", count: 1, state: "43", summary: "43%",
+                            controlType: "read_only", availableActions: [],
+                            controllable: false, readOnly: true, supportsBrightness: false, brightness: nil
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "motion", name: "Motion", count: 1, state: "clear", summary: "Clear",
+                            controlType: "read_only", availableActions: [],
+                            controllable: false, readOnly: true, supportsBrightness: false, brightness: nil
+                        )
+                    ]
+                ),
+                LittleSpudHomeRoom(
+                    id: "living_room",
+                    name: "Living Room",
+                    deviceCount: 4,
+                    summary: ["1 of 3 lights on", "Fan off"],
+                    categories: [
+                        LittleSpudHomeCategory(
+                            id: "light", name: "Lights", count: 3, state: "mixed", summary: "1 of 3 on",
+                            controlType: "light", availableActions: ["turn_on", "turn_off", "set_brightness"],
+                            controllable: true, readOnly: false, supportsBrightness: true, brightness: 42
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "fan", name: "Fans", count: 1, state: "off", summary: "Off",
+                            controlType: "power", availableActions: ["turn_on", "turn_off"],
+                            controllable: true, readOnly: false, supportsBrightness: false, brightness: nil
+                        )
+                    ]
+                ),
+                LittleSpudHomeRoom(
+                    id: "garage",
+                    name: "Garage",
+                    deviceCount: 3,
+                    summary: ["Garage Door closed"],
+                    categories: [
+                        LittleSpudHomeCategory(
+                            id: "garage_door", name: "Garage Doors", count: 1, state: "closed", summary: "Closed",
+                            controlType: "cover", availableActions: ["open", "close"],
+                            controllable: true, readOnly: false, supportsBrightness: false, brightness: nil
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "entry_sensor", name: "Door & Window Sensors", count: 1, state: "all_closed", summary: "All closed",
+                            controlType: "read_only", availableActions: [],
+                            controllable: false, readOnly: true, supportsBrightness: false, brightness: nil
+                        ),
+                        LittleSpudHomeCategory(
+                            id: "temperature", name: "Temperature", count: 1, state: "65_f", summary: "65°F",
+                            controlType: "read_only", availableActions: [],
+                            controllable: false, readOnly: true, supportsBrightness: false, brightness: nil
+                        )
+                    ]
+                )
+            ],
+            generatedAt: Date()
+        )
+    }
+
+    private func demoMusicSnapshot(query: String = "") -> LittleSpudMusicSnapshot {
+        let allTracks = [
+            LittleSpudMusicTrack(
+                id: "demo:three-little-birds",
+                title: "Three Little Birds",
+                artist: "Bob Marley & The Wailers",
+                albumArtist: "Bob Marley & The Wailers",
+                album: "Exodus",
+                genre: "Reggae",
+                durationSeconds: 180,
+                durationDisplay: "3:00",
+                provider: "tater_tube",
+                artworkURL: ""
+            ),
+            LittleSpudMusicTrack(
+                id: "demo:blue-in-green",
+                title: "Blue in Green",
+                artist: "Miles Davis",
+                albumArtist: "Miles Davis",
+                album: "Kind of Blue",
+                genre: "Jazz",
+                durationSeconds: 220,
+                durationDisplay: "3:40",
+                provider: "tater_tube",
+                artworkURL: ""
+            ),
+            LittleSpudMusicTrack(
+                id: "demo:morning-sun",
+                title: "Morning Sun",
+                artist: "Little Spud Radio",
+                albumArtist: "Little Spud Radio",
+                album: "Wake Up",
+                genre: "Chill",
+                durationSeconds: 194,
+                durationDisplay: "3:14",
+                provider: "tater_tube",
+                artworkURL: ""
+            ),
+        ]
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let tracks = cleanQuery.isEmpty
+            ? allTracks
+            : allTracks.filter {
+                [$0.title, $0.artist, $0.album, $0.genre]
+                    .joined(separator: " ")
+                    .lowercased()
+                    .contains(cleanQuery)
+            }
+        let provider = LittleSpudMusicProvider(
+            id: "tater_tube",
+            label: "Tater Tube Server",
+            connected: true,
+            active: true,
+            localPlayback: true
+        )
+        return LittleSpudMusicSnapshot(
+            available: true,
+            provider: provider,
+            providers: [provider],
+            tracks: tracks,
+            trackFeedKind: cleanQuery.isEmpty ? "personalized" : "search",
+            trackFeedTitle: cleanQuery.isEmpty ? "For You" : "Results",
+            trackFeedSummary: cleanQuery.isEmpty
+                ? "Tater blended your AI picks with the artists, albums, and genres you play."
+                : "",
+            trackCount: allTracks.count,
+            artists: ["Bob Marley & The Wailers", "Little Spud Radio", "Miles Davis"],
+            albums: ["Exodus", "Kind of Blue", "Wake Up"],
+            genres: ["Chill", "Jazz", "Reggae"],
+            recommendations: [
+                LittleSpudMusicRecommendation(
+                    id: "demo:easy-morning",
+                    name: "Easy Morning Roots",
+                    description: "A warm Tater mix built from your recent reggae and mellow morning plays.",
+                    tracks: [allTracks[0], allTracks[2]],
+                    artworkURL: ""
+                ),
+                LittleSpudMusicRecommendation(
+                    id: "demo:blue-hour",
+                    name: "Blue Hour",
+                    description: "Relaxed jazz and gentle tracks for the end of the day.",
+                    tracks: [allTracks[1], allTracks[2]],
+                    artworkURL: ""
+                ),
+            ],
+            recommendationSummary: "Tater picks made from what you have been listening to.",
+            recommendationGeneratedAt: Date(),
+            targets: [
+                LittleSpudMusicTarget(
+                    id: "little_spud:local",
+                    label: "This iPhone",
+                    kind: "local"
+                ),
+                LittleSpudMusicTarget(
+                    id: "voice_core:native:kitchen",
+                    label: "Tater Satellite: Kitchen",
+                    kind: "satellite"
+                ),
+                LittleSpudMusicTarget(
+                    id: "voice_core:native:living-room",
+                    label: "Tater Satellite: Living Room",
+                    kind: "satellite"
+                ),
+            ],
+            player: .idle,
+            syncedAt: Date()
+        )
+    }
+
+    private func applyDemoHomeAction(
+        roomID: String,
+        categoryID: String,
+        action: String,
+        value: Double?,
+        mode: String?,
+        temperatureUnit: String?
+    ) {
+        guard let roomIndex = homeSnapshot.rooms.firstIndex(where: { $0.id == roomID }),
+              let categoryIndex = homeSnapshot.rooms[roomIndex].categories.firstIndex(where: { $0.id == categoryID })
+        else { return }
+        var room = homeSnapshot.rooms[roomIndex]
+        var category = room.categories[categoryIndex]
+        switch action {
+        case "turn_on":
+            category.state = "on"
+            category.summary = category.count == 1 ? "On" : "\(category.count) of \(category.count) on"
+        case "turn_off":
+            category.state = "off"
+            category.summary = category.count == 1 ? "Off" : "0 of \(category.count) on"
+        case "set_brightness":
+            let brightness = max(0, min(100, value ?? category.brightness ?? 50))
+            category.brightness = brightness
+            category.state = brightness > 0 ? "on" : "off"
+            category.summary = category.count == 1
+                ? (brightness > 0 ? "On" : "Off")
+                : "\(brightness > 0 ? category.count : 0) of \(category.count) on"
+        case "set_temperature":
+            let minimum = category.minimumTemperature ?? (category.temperatureUnit == "C" ? 7 : 45)
+            let maximum = category.maximumTemperature ?? (category.temperatureUnit == "C" ? 32 : 90)
+            let reportedUnit = category.temperatureUnit == "C" ? "C" : "F"
+            let requestedUnit = temperatureUnit == "C" ? "C" : "F"
+            let requestedTemperature = value.map {
+                convertHomeTemperature($0, from: requestedUnit, to: reportedUnit)
+            }
+            let temperature = max(
+                minimum,
+                min(
+                    maximum,
+                    requestedTemperature
+                        ?? category.targetTemperature
+                        ?? category.currentTemperature
+                        ?? (reportedUnit == "C" ? 21 : 70)
+                )
+            )
+            category.targetTemperature = temperature
+            category.summary = "\(homeTemperatureText(category.currentTemperature, unit: category.temperatureUnit)) · \(category.hvacMode.replacingOccurrences(of: "_", with: " ").capitalized)"
+        case "set_hvac_mode":
+            guard let mode, !mode.isEmpty else { return }
+            category.hvacMode = mode
+            category.state = mode
+            category.summary = "\(homeTemperatureText(category.currentTemperature, unit: category.temperatureUnit)) · \(mode.replacingOccurrences(of: "_", with: " ").capitalized)"
+        case "open":
+            category.state = "open"
+            category.summary = "Open"
+        case "close":
+            category.state = "closed"
+            category.summary = "Closed"
+        case "lock":
+            category.state = "locked"
+            category.summary = "Locked"
+        case "unlock":
+            category.state = "unlocked"
+            category.summary = "Unlocked"
+        default:
+            return
+        }
+        room.categories[categoryIndex] = category
+        room.summary = demoRoomSummary(room.categories)
+        homeSnapshot.rooms[roomIndex] = room
+        homeSnapshot.generatedAt = Date()
+        HapticManager.shared.play("messageComplete")
+    }
+
+    private func homeTemperatureText(_ value: Double?, unit: String) -> String {
+        guard let value else { return "Temperature unavailable" }
+        let rounded = value.rounded()
+        let number = abs(value - rounded) < 0.05
+            ? String(Int(rounded))
+            : String(format: "%.1f", value)
+        return "\(number)°\(unit == "C" ? "C" : "F")"
+    }
+
+    private func convertHomeTemperature(
+        _ value: Double,
+        from sourceUnit: String,
+        to targetUnit: String
+    ) -> Double {
+        let source = sourceUnit == "C" ? "C" : "F"
+        let target = targetUnit == "C" ? "C" : "F"
+        guard source != target else { return value }
+        return target == "C"
+            ? (value - 32) * 5 / 9
+            : value * 9 / 5 + 32
+    }
+
+    private func demoRoomSummary(_ categories: [LittleSpudHomeCategory]) -> [String] {
+        categories.filter { !$0.readOnly }.prefix(3).map { category in
+            if category.controlType == "light" || category.controlType == "power" {
+                let label = category.count == 1 ? String(category.name.dropLast(category.name.hasSuffix("s") ? 1 : 0)) : category.name
+                return "\(label) \(category.summary.lowercased())"
+            }
+            let label = category.count == 1 ? String(category.name.dropLast(category.name.hasSuffix("s") ? 1 : 0)) : category.name
+            return "\(label) \(category.summary.lowercased())"
+        }
     }
 
     func markNotificationsRead() {
@@ -659,8 +1928,10 @@ final class LittleSpudViewModel: ObservableObject {
     func handleRemotePushToken(_ token: String) {
         let clean = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+        let previous = UserDefaults.standard.string(forKey: remotePushTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         UserDefaults.standard.set(clean, forKey: remotePushTokenKey)
-        syncRemotePushRegistrationIfPossible(force: true)
+        syncRemotePushRegistrationIfPossible(force: previous != clean)
     }
 
     func handleRemotePushRegistrationFailure(_ message: String?) {
@@ -682,6 +1953,11 @@ final class LittleSpudViewModel: ObservableObject {
             clearStoredRemotePushRegistration()
         }
         pauseForegroundWork()
+        homeTask?.cancel()
+        homeTask = nil
+        musicTask?.cancel()
+        musicTask = nil
+        stopLocalMusic(clearTrack: true)
         stopSpeech()
         cancelVoiceInput()
         KeychainStore.delete(account: sessionAccount)
@@ -692,6 +1968,19 @@ final class LittleSpudViewModel: ObservableObject {
         hubConnected = false
         hubUrl = ""
         syncCode = ""
+        homeSnapshot = .empty
+        homeLoading = false
+        homeError = ""
+        homeControlsInFlight = []
+        homeCameraSnapshots = [:]
+        homeCameraLoading = []
+        homeCameraErrors = [:]
+        musicSnapshot = .empty
+        musicLoading = false
+        musicError = ""
+        musicQuery = ""
+        selectedMusicTargetIDs = []
+        musicProgressSeconds = 0
         statusText = "Little Spud forgot this pairing."
         statusKind = ""
 
@@ -739,15 +2028,25 @@ final class LittleSpudViewModel: ObservableObject {
             requestRemoteNotifications()
             return
         }
-        if pushRegistrationTask != nil && !force {
-            return
+        let fingerprint = String(token.suffix(24))
+        if pushRegistrationTask != nil {
+            if pushRegistrationFingerprintInFlight == fingerprint || !force {
+                return
+            }
+            pushRegistrationTask?.cancel()
         }
-        pushRegistrationTask?.cancel()
+        pushRegistrationGeneration += 1
+        let generation = pushRegistrationGeneration
+        pushRegistrationFingerprintInFlight = fingerprint
         pushRegistrationTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.pushRegistrationTask = nil }
+            defer {
+                if self.pushRegistrationGeneration == generation {
+                    self.pushRegistrationTask = nil
+                    self.pushRegistrationFingerprintInFlight = ""
+                }
+            }
             do {
-                let fingerprint = String(token.suffix(24))
                 var registration = loadStoredRemotePushRegistration()
                 if force || registration?.tokenFingerprint != fingerprint || registration?.isComplete != true {
                     registration = try await api.registerPushGateway(
@@ -755,6 +2054,7 @@ final class LittleSpudViewModel: ObservableObject {
                         session: currentSession,
                         environment: remotePushEnvironment
                     )
+                    guard !Task.isCancelled else { return }
                     if let registration {
                         saveStoredRemotePushRegistration(registration)
                     }
@@ -765,11 +2065,15 @@ final class LittleSpudViewModel: ObservableObject {
                     registration: registration,
                     enabled: true
                 )
+                guard !Task.isCancelled else { return }
                 session = updated
                 hubUrl = updated.hubUrl
                 hubConnected = true
                 saveSession()
             } catch {
+                if Task.isCancelled || isExpectedCancellation(error) {
+                    return
+                }
                 if (error as? SpudLinkAPIError)?.statusCode == 404 {
                     remotePushRegistrationUnsupported = true
                     print("Little Spud push sync skipped: paired Tater does not support push registration yet.")
@@ -815,11 +2119,17 @@ final class LittleSpudViewModel: ObservableObject {
             updateAssistantName(syncState.assistantName)
             mergeHubHistory(syncState.messages)
             mergeActiveRuns(syncState.activeRuns)
+            if activeLane == .home {
+                refreshHome()
+            }
             if showStatus {
                 statusText = "Synced with Tater."
                 statusKind = "ok"
             }
         } catch {
+            if Task.isCancelled || isExpectedCancellation(error) {
+                return
+            }
             markHubDisconnectedIfIdle()
             if showStatus {
                 statusText = error.localizedDescription
@@ -882,6 +2192,7 @@ final class LittleSpudViewModel: ObservableObject {
                 let consumeNotification = !state.1
                 do {
                     if let notification = try await client.pollNotification(session: snapshot, consume: consumeNotification) {
+                        guard !Task.isCancelled else { return }
                         await MainActor.run {
                             self?.hubConnected = true
                             self?.appendHubNotification(notification)
@@ -894,6 +2205,9 @@ final class LittleSpudViewModel: ObservableObject {
                         }
                     }
                 } catch {
+                    if Task.isCancelled || self?.isExpectedCancellation(error) == true {
+                        return
+                    }
                     await MainActor.run {
                         self?.markHubDisconnectedIfIdle()
                         Task { [weak self] in
@@ -949,6 +2263,7 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     private func markChatRunDetached(assistantId: String) async {
+        lastStreamHapticByMessageId.removeValue(forKey: assistantId)
         if let messageIndex = messages.firstIndex(where: { $0.id == assistantId }) {
             messages[messageIndex].content = "Tater is thinking"
             messages[messageIndex].kind = "pending"
@@ -987,6 +2302,19 @@ final class LittleSpudViewModel: ObservableObject {
             || message.contains("network connection was lost")
             || message.contains("offline")
             || message.contains("not connected")
+    }
+
+    private func isExpectedCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return true
+        }
+        return error.localizedDescription
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "cancelled"
     }
 
     private func appendToolNotice(_ notice: SpudLinkToolNotice, beforeAssistantId: String) {
@@ -1029,13 +2357,46 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    private func appendAssistantResponseChunk(id: String, chunk: String) {
+        guard !chunk.isEmpty else { return }
+        guard let messageIndex = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard messages[messageIndex].role == .assistant else { return }
+
+        if messages[messageIndex].kind != "streaming" {
+            messages[messageIndex].content = ""
+            messages[messageIndex].kind = "streaming"
+        }
+        messages[messageIndex].content += chunk
+
+        let now = Date()
+        let lastHaptic = lastStreamHapticByMessageId[id] ?? .distantPast
+        if now.timeIntervalSince(lastHaptic) > 0.085 {
+            HapticManager.shared.play("replyTick")
+            lastStreamHapticByMessageId[id] = now
+        }
+    }
+
+    private func completeAssistantResponse(id: String) async {
+        lastStreamHapticByMessageId.removeValue(forKey: id)
+        completedMessageId = id
+        HapticManager.shared.play("messageComplete")
+        saveMessages()
+        try? await Task.sleep(nanoseconds: 420_000_000)
+        if completedMessageId == id {
+            completedMessageId = nil
+        }
+    }
+
     private func appendHubNotification(_ notification: HubNotification) {
         let message = LittleSpudMessage(
             id: notification.id,
             role: .system,
             content: notification.content.isEmpty ? "Notification" : notification.content,
             createdAt: notification.createdAt,
-            kind: "notification"
+            kind: "notification",
+            notificationTitle: notification.title,
+            notificationBody: notification.message,
+            notificationPriority: notification.priority
         )
         appendNotificationMessage(message)
         // Remote push owns device notifications on iOS. Polling only updates chat
@@ -1758,7 +3119,10 @@ final class LittleSpudViewModel: ObservableObject {
                 role: .system,
                 content: notification.content.isEmpty ? "Notification" : notification.content,
                 createdAt: notification.createdAt,
-                kind: "notification"
+                kind: "notification",
+                notificationTitle: notification.title,
+                notificationBody: notification.message,
+                notificationPriority: notification.priority
             ))
         }
     }
@@ -1770,7 +3134,10 @@ final class LittleSpudViewModel: ObservableObject {
             content: message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Notification" : message.content,
             createdAt: message.createdAt,
             kind: "notification",
-            attachments: message.attachments
+            attachments: message.attachments,
+            notificationTitle: message.notificationTitle,
+            notificationBody: message.notificationBody,
+            notificationPriority: message.notificationPriority
         )
         guard mergeStoredNotificationMessage(normalized) else { return }
         sortAndLimitNotifications()
@@ -1897,6 +3264,13 @@ final class LittleSpudViewModel: ObservableObject {
         completedMessageId = nil
         notificationUnreadCount = 0
         activeLane = .chat
+        homeSnapshot = .empty
+        homeLoading = false
+        homeError = ""
+        homeControlsInFlight = []
+        homeCameraSnapshots = [:]
+        homeCameraLoading = []
+        homeCameraErrors = [:]
         UserDefaults.standard.removeObject(forKey: messagesKey)
         UserDefaults.standard.removeObject(forKey: notificationMessagesKey)
         if let url = messagesStoreURL() {

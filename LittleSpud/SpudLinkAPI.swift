@@ -182,6 +182,7 @@ final class SpudLinkAPI {
 
         var lastError: Error?
         for candidate in routeCandidates(for: session, preferHome: preferHome) {
+            try Task.checkCancellation()
             do {
                 var candidateSession = session
                 candidateSession.hubUrl = candidate.url
@@ -193,6 +194,9 @@ final class SpudLinkAPI {
                 let payload = try await fetchDictionary(request, actionLabel: "Hub ping")
                 return updatedSession(from: payload, session: candidateSession)
             } catch {
+                if Task.isCancelled || isCancelledRequest(error) {
+                    throw error
+                }
                 lastError = error
             }
         }
@@ -211,6 +215,14 @@ final class SpudLinkAPI {
         updated.toolsEnabled = dictBool(hub, "tools_enabled") ?? updated.toolsEnabled
         updated.lastSeenAt = Date()
         return updated
+    }
+
+    private func isCancelledRequest(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
     func fetchHistory(session: LittleSpudSession) async throws -> [HubHistoryMessage] {
@@ -235,6 +247,232 @@ final class SpudLinkAPI {
             activeRuns: runs.compactMap(normalizeActiveRun),
             assistantName: dictString(payload, "assistant_name").ifEmpty(dictString(hub, "assistant_name", "tater_name"))
         )
+    }
+
+    func fetchHome(session: LittleSpudSession, refresh: Bool = false) async throws -> LittleSpudHomeSnapshot {
+        let path = "/api/spudlink/v1/home?refresh=\(refresh ? "true" : "false")"
+        var request = try authorizedRequest(session: session, path: path)
+        request.timeoutInterval = refresh ? 30 : 12
+        let payload = try await fetchDictionary(request, actionLabel: "Home sync")
+        return normalizeHomeSnapshot(payload)
+    }
+
+    func fetchHomeCameraSnapshot(
+        session: LittleSpudSession,
+        roomID: String,
+        cameraID: String
+    ) async throws -> Data {
+        let cleanRoomID = roomID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCameraID = cameraID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanRoomID.isEmpty, !cleanCameraID.isEmpty else {
+            throw SpudLinkAPIError.message("Camera snapshot failed: the camera is no longer available.")
+        }
+        let path = "/api/spudlink/v1/home/rooms/\(cleanRoomID)/cameras/\(cleanCameraID)/snapshot"
+        var request = try authorizedRequest(session: session, path: path)
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await urlSession.data(for: request)
+        try validate(response: response, data: data, actionLabel: "Camera snapshot")
+        guard !data.isEmpty else {
+            throw SpudLinkAPIError.message("Camera snapshot failed: the camera returned no image.")
+        }
+        guard data.count <= 12 * 1024 * 1024 else {
+            throw SpudLinkAPIError.message("Camera snapshot failed: the image is too large.")
+        }
+        return data
+    }
+
+    func controlHomeCategory(
+        session: LittleSpudSession,
+        roomID: String,
+        categoryID: String,
+        action: String,
+        value: Double? = nil,
+        mode: String? = nil,
+        temperatureUnit: String? = nil
+    ) async throws -> LittleSpudHomeSnapshot {
+        var body: [String: Any] = [
+            "room_id": roomID,
+            "category_id": categoryID,
+            "action": action
+        ]
+        if let value {
+            body["value"] = value
+        }
+        if let mode, !mode.isEmpty {
+            body["mode"] = mode
+        }
+        if let temperatureUnit, !temperatureUnit.isEmpty {
+            body["temperature_unit"] = temperatureUnit
+        }
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/home/actions")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.httpBody = try jsonData(body)
+        let payload = try await fetchDictionary(request, actionLabel: "Home control")
+        return normalizeHomeSnapshot(payload)
+    }
+
+    func fetchMusic(
+        session: LittleSpudSession,
+        query: String = "",
+        refresh: Bool = false,
+        limit: Int? = nil
+    ) async throws -> LittleSpudMusicSnapshot {
+        let defaultLimit = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 20 : 80
+        let trackLimit = min(200, max(1, limit ?? defaultLimit))
+        var components = URLComponents(
+            string: hubAPIURL(session.hubUrl, "/api/spudlink/v1/music")
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "limit", value: String(trackLimit)),
+            URLQueryItem(name: "refresh", value: refresh ? "true" : "false"),
+        ]
+        guard let endpoint = components?.url else {
+            throw SpudLinkAPIError.message("Music URL is not valid.")
+        }
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = refresh ? 180 : 20
+        applyAuthorization(to: &request, session: session)
+        let payload = try await fetchDictionary(request, actionLabel: "Music")
+        return normalizeMusicSnapshot(payload)
+    }
+
+    func controlMusic(
+        session: LittleSpudSession,
+        action: String,
+        trackID: String = "",
+        trackIDs: [String] = [],
+        recommendationID: String = "",
+        query: String = "",
+        target: String = "",
+        targets: [String] = [],
+        provider: String = "",
+        volumePercent: Int = 75,
+        positionSeconds: Double? = nil
+    ) async throws -> LittleSpudMusicSnapshot {
+        var body: [String: Any] = [
+            "action": action,
+            "volume_percent": max(0, min(100, volumePercent)),
+        ]
+        if !trackID.isEmpty {
+            body["track_id"] = trackID
+        }
+        if !trackIDs.isEmpty {
+            body["track_ids"] = Array(trackIDs.prefix(200))
+        }
+        if !recommendationID.isEmpty {
+            body["recommendation_id"] = recommendationID
+        }
+        if !query.isEmpty {
+            body["query"] = query
+        }
+        if !targets.isEmpty {
+            body["targets"] = targets
+        } else if !target.isEmpty {
+            body["target"] = target
+        }
+        if !provider.isEmpty {
+            body["provider"] = provider
+        }
+        if let positionSeconds {
+            body["position_seconds"] = max(0, positionSeconds)
+        }
+        var request = try authorizedRequest(
+            session: session,
+            path: "/api/spudlink/v1/music/actions"
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = action == "refresh" ? 180 : 45
+        request.httpBody = try jsonData(body)
+        let payload = try await fetchDictionary(request, actionLabel: "Music control")
+        return normalizeMusicSnapshot(dict(payload["state"]) ?? payload)
+    }
+
+    func fetchLocalMusicContinuation(
+        session: LittleSpudSession,
+        provider: String,
+        trackIDs: [String],
+        currentTrackID: String,
+        queueIndex: Int,
+        queueSessionID: String
+    ) async throws -> LittleSpudMusicContinuation {
+        var request = try authorizedRequest(
+            session: session,
+            path: "/api/spudlink/v1/music/actions"
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+        request.httpBody = try jsonData([
+            "action": "continue_local",
+            "provider": provider,
+            "track_id": currentTrackID,
+            "track_ids": Array(trackIDs.prefix(200)),
+            "queue_index": max(0, queueIndex),
+            "queue_session_id": queueSessionID,
+        ])
+        let payload = try await fetchDictionary(
+            request,
+            actionLabel: "Little Spud continuous radio"
+        )
+        return LittleSpudMusicContinuation(
+            tracks: (payload["tracks"] as? [[String: Any]] ?? [])
+                .compactMap(normalizeMusicTrack),
+            stationName: dictString(payload, "station_name").ifEmpty(
+                "Little Spud Continuous Radio"
+            ),
+            source: dictString(payload, "source").ifEmpty("smart_fallback")
+        )
+    }
+
+    func reportLocalMusicStarted(
+        session: LittleSpudSession,
+        provider: String,
+        trackID: String
+    ) async throws {
+        guard !trackID.isEmpty else { return }
+        var request = try authorizedRequest(
+            session: session,
+            path: "/api/spudlink/v1/music/actions"
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = try jsonData([
+            "action": "local_play_started",
+            "provider": provider,
+            "track_id": trackID,
+        ])
+        _ = try await fetchDictionary(request, actionLabel: "Local music history")
+    }
+
+    func musicStreamURL(
+        session: LittleSpudSession,
+        track: LittleSpudMusicTrack
+    ) throws -> URL {
+        var allowed = CharacterSet.alphanumerics
+        allowed.formUnion(CharacterSet(charactersIn: "-._~"))
+        guard
+            let encodedID = track.id.addingPercentEncoding(withAllowedCharacters: allowed),
+            !encodedID.isEmpty,
+            var components = URLComponents(
+                string: hubAPIURL(
+                    session.hubUrl,
+                    "/api/spudlink/v1/music/stream/\(encodedID)"
+                )
+            )
+        else {
+            throw SpudLinkAPIError.message("Music stream URL is not valid.")
+        }
+        components.queryItems = [
+            URLQueryItem(name: "provider", value: track.provider),
+            URLQueryItem(name: "token", value: session.token),
+        ]
+        guard let streamURL = components.url else {
+            throw SpudLinkAPIError.message("Music stream URL is not valid.")
+        }
+        return streamURL
     }
 
     func pollNotification(session: LittleSpudSession, waitSeconds: Int = 20, consume: Bool = true) async throws -> HubNotification? {
@@ -389,7 +627,8 @@ final class SpudLinkAPI {
         messages: [LittleSpudMessage],
         text: String,
         attachments: [LittleSpudAttachment],
-        onToolNotice: @escaping (SpudLinkToolNotice) -> Void
+        onToolNotice: @escaping (SpudLinkToolNotice) -> Void,
+        onResponseChunk: @escaping (String) async -> Void
     ) async throws -> SpudLinkChatResponse {
         var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/tater/chat")
         request.httpMethod = "POST"
@@ -440,12 +679,13 @@ final class SpudLinkAPI {
             onToolNotice(notice)
         }
 
-        func updateContentFromOpenAIStylePayload(_ payload: [String: Any]) {
+        func updateContentFromOpenAIStylePayload(_ payload: [String: Any]) async {
             guard let choices = payload["choices"] as? [[String: Any]], let first = choices.first else { return }
             if let delta = first["delta"] as? [String: Any] {
                 let deltaContent = dictString(delta, "content")
                 if !deltaContent.isEmpty {
                     content += deltaContent
+                    await onResponseChunk(deltaContent)
                 }
             }
             if let message = first["message"] as? [String: Any] {
@@ -456,7 +696,7 @@ final class SpudLinkAPI {
             }
         }
 
-        func handleBlock(_ block: String) throws -> Bool {
+        func handleBlock(_ block: String) async throws -> Bool {
             var event = "message"
             var dataLines: [String] = []
 
@@ -486,6 +726,12 @@ final class SpudLinkAPI {
             switch event {
             case "tater.tool":
                 emitToolNotice(payload)
+            case "tater.response_chunk":
+                let chunk = dictString(payload, "chunk", "content", "delta")
+                if !chunk.isEmpty {
+                    content += chunk
+                    await onResponseChunk(chunk)
+                }
             case "tater.message":
                 if let notices = payload["tool_notices"] as? [[String: Any]] {
                     notices.forEach(emitToolNotice)
@@ -505,7 +751,7 @@ final class SpudLinkAPI {
             case "tater.done":
                 return true
             case "message":
-                updateContentFromOpenAIStylePayload(payload)
+                await updateContentFromOpenAIStylePayload(payload)
             default:
                 break
             }
@@ -531,7 +777,7 @@ final class SpudLinkAPI {
                 let blockData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                 buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                 let block = String(decoding: blockData, as: UTF8.self)
-                if try handleBlock(block) {
+                if try await handleBlock(block) {
                     return SpudLinkChatResponse(content: content, reopenMic: reopenMic, attachments: dedupeAttachments(attachments))
                 }
             }
@@ -539,7 +785,7 @@ final class SpudLinkAPI {
 
         if !buffer.isEmpty {
             let block = String(decoding: buffer, as: UTF8.self)
-            _ = try handleBlock(block)
+            _ = try await handleBlock(block)
         }
         return SpudLinkChatResponse(content: content, reopenMic: reopenMic, attachments: dedupeAttachments(attachments))
     }
@@ -676,11 +922,18 @@ final class SpudLinkAPI {
 
     private func authorizedRequest(session: LittleSpudSession, path: String) throws -> URLRequest {
         var request = URLRequest(url: try url(hubAPIURL(session.hubUrl, path), label: "Tater URL"))
+        applyAuthorization(to: &request, session: session)
+        return request
+    }
+
+    private func applyAuthorization(
+        to request: inout URLRequest,
+        session: LittleSpudSession
+    ) {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(session.token)", forHTTPHeaderField: "Authorization")
         request.setValue(session.userName, forHTTPHeaderField: "X-SpudLink-User")
         request.setValue(session.deviceName, forHTTPHeaderField: "X-SpudLink-Device")
-        return request
     }
 
     private func fetchDictionary(_ request: URLRequest, actionLabel: String) async throws -> [String: Any] {
@@ -717,6 +970,220 @@ final class SpudLinkAPI {
             kind: dictString(dict(item["meta"]), "kind"),
             attachments: attachments
         )
+    }
+
+    private func normalizeHomeSnapshot(_ payload: [String: Any]) -> LittleSpudHomeSnapshot {
+        let roomRows = payload["rooms"] as? [[String: Any]] ?? []
+        let rooms = roomRows.compactMap { room -> LittleSpudHomeRoom? in
+            let roomID = dictString(room, "id")
+            guard !roomID.isEmpty else { return nil }
+            let categoryRows = room["categories"] as? [[String: Any]] ?? []
+            let categories = categoryRows.compactMap { category -> LittleSpudHomeCategory? in
+                let categoryID = dictString(category, "id")
+                guard !categoryID.isEmpty else { return nil }
+                let actions = (category["available_actions"] as? [Any] ?? [])
+                    .map { String(describing: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                let cameraPreviews = (category["camera_previews"] as? [[String: Any]] ?? [])
+                    .compactMap { preview -> LittleSpudCameraPreview? in
+                        let previewID = dictString(preview, "id")
+                        guard !previewID.isEmpty else { return nil }
+                        return LittleSpudCameraPreview(
+                            id: previewID,
+                            label: dictString(preview, "label").ifEmpty("Camera")
+                        )
+                    }
+                let controllable = dictBool(category, "controllable") ?? !actions.isEmpty
+                return LittleSpudHomeCategory(
+                    id: categoryID,
+                    name: dictString(category, "name").ifEmpty(categoryID.replacingOccurrences(of: "_", with: " ").capitalized),
+                    count: intValue(category["count"]),
+                    state: dictString(category, "state").ifEmpty("unknown"),
+                    summary: dictString(category, "summary", "reading").ifEmpty("Status unavailable"),
+                    controlType: dictString(category, "control_type").ifEmpty("read_only"),
+                    availableActions: actions,
+                    controllable: controllable,
+                    readOnly: dictBool(category, "read_only") ?? !controllable,
+                    supportsBrightness: dictBool(category, "supports_brightness") ?? false,
+                    brightness: doubleValue(category["brightness"]),
+                    onCount: category["on_count"] == nil ? nil : intValue(category["on_count"]),
+                    openCount: category["open_count"] == nil ? nil : intValue(category["open_count"]),
+                    currentTemperature: doubleValue(category["current_temperature"]),
+                    targetTemperature: doubleValue(category["target_temperature"]),
+                    temperatureUnit: dictString(category, "temperature_unit").ifEmpty("F"),
+                    hvacMode: dictString(category, "hvac_mode"),
+                    availableHVACModes: (category["available_hvac_modes"] as? [Any] ?? [])
+                        .map { String(describing: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty },
+                    minimumTemperature: doubleValue(category["minimum_temperature"]),
+                    maximumTemperature: doubleValue(category["maximum_temperature"]),
+                    temperatureStep: doubleValue(category["temperature_step"]),
+                    cameraPreviews: cameraPreviews
+                )
+            }
+            let summary = (room["summary"] as? [Any] ?? [])
+                .map { String(describing: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return LittleSpudHomeRoom(
+                id: roomID,
+                name: dictString(room, "name").ifEmpty("Room"),
+                deviceCount: intValue(room["device_count"]),
+                summary: summary,
+                categories: categories
+            )
+        }
+        return LittleSpudHomeSnapshot(
+            rooms: rooms,
+            generatedAt: dateValue(payload, keys: ["generated_at", "generatedAt"]).ifNil(Date())
+        )
+    }
+
+    private func normalizeMusicSnapshot(
+        _ payload: [String: Any]
+    ) -> LittleSpudMusicSnapshot {
+        let provider = normalizeMusicProvider(dict(payload["provider"]))
+        let providers = (payload["providers"] as? [[String: Any]] ?? [])
+            .compactMap(normalizeMusicProvider)
+        let tracks = (payload["tracks"] as? [[String: Any]] ?? [])
+            .compactMap(normalizeMusicTrack)
+        let trackFeed = dict(payload["track_feed"]) ?? [:]
+        let artists = stringList(payload["artists"])
+        let albums = stringList(payload["albums"])
+        let genres = stringList(payload["genres"])
+        let recommendations = (payload["recommendations"] as? [[String: Any]] ?? [])
+            .compactMap { item -> LittleSpudMusicRecommendation? in
+                let id = dictString(item, "id")
+                guard !id.isEmpty else { return nil }
+                let recommendationTracks = (item["tracks"] as? [[String: Any]] ?? [])
+                    .compactMap(normalizeMusicTrack)
+                return LittleSpudMusicRecommendation(
+                    id: id,
+                    name: dictString(item, "name", "title").ifEmpty("Tater Mix"),
+                    description: dictString(item, "description", "subtitle"),
+                    tracks: recommendationTracks,
+                    artworkURL: dictString(item, "artwork_url")
+                )
+            }
+        let targets = (payload["targets"] as? [[String: Any]] ?? [])
+            .compactMap { item -> LittleSpudMusicTarget? in
+                let id = dictString(item, "id", "value")
+                guard !id.isEmpty else { return nil }
+                return LittleSpudMusicTarget(
+                    id: id,
+                    label: dictString(item, "label", "name").ifEmpty(id),
+                    kind: dictString(item, "kind").ifEmpty("player"),
+                    description: dictString(item, "description", "meta"),
+                    airplayBridgeTarget: dictString(item, "airplay_bridge_target"),
+                    transportMode: dictString(item, "transport_mode"),
+                    transportOptions: (item["transport_options"] as? [[String: Any]] ?? [])
+                        .map { dictString($0, "value") }
+                        .filter { !$0.isEmpty }
+                )
+            }
+        let playerPayload = dict(payload["player"]) ?? [:]
+        let player = LittleSpudMusicPlayerState(
+            status: dictString(playerPayload, "status").ifEmpty("idle"),
+            provider: dictString(playerPayload, "provider"),
+            current: normalizeMusicTrack(dict(playerPayload["current"])),
+            targets: (playerPayload["targets"] as? [Any] ?? [])
+                .map { String(describing: $0) }
+                .filter { !$0.isEmpty },
+            queueCount: intValue(playerPayload["queue_count"]),
+            queueIndex: intValue(playerPayload["queue_index"]),
+            queue: (playerPayload["queue"] as? [[String: Any]] ?? [])
+                .compactMap(normalizeMusicTrack),
+            shuffle: dictBool(playerPayload, "shuffle") ?? false,
+            repeatMode: dictString(playerPayload, "repeat").ifEmpty("off"),
+            continuousRadio: dictBool(playerPayload, "continuous_radio") ?? false,
+            radioName: dictString(playerPayload, "radio_name"),
+            positionSeconds: max(0, doubleValue(playerPayload["position_seconds"]) ?? 0),
+            durationSeconds: max(0, doubleValue(playerPayload["duration_seconds"]) ?? 0),
+            seekable: dictBool(playerPayload, "seekable") ?? false,
+            volumePercent: max(
+                0,
+                min(100, intValue(playerPayload["volume_percent"]))
+            )
+        )
+        let syncedAt = doubleValue(payload["synced_at"]).flatMap {
+            $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
+        }
+        let recommendationGeneratedAt = doubleValue(
+            payload["recommendation_generated_at"]
+        ).flatMap {
+            $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
+        }
+        return LittleSpudMusicSnapshot(
+            available: dictBool(payload, "available") ?? true,
+            provider: provider,
+            providers: providers,
+            tracks: tracks,
+            trackFeedKind: dictString(trackFeed, "kind").ifEmpty("library"),
+            trackFeedTitle: dictString(trackFeed, "title").ifEmpty("Library"),
+            trackFeedSummary: dictString(trackFeed, "summary"),
+            trackCount: intValue(payload["track_count"]),
+            artists: artists,
+            albums: albums,
+            genres: genres,
+            recommendations: recommendations,
+            recommendationSummary: dictString(payload, "recommendation_summary"),
+            recommendationGeneratedAt: recommendationGeneratedAt,
+            targets: targets,
+            player: player,
+            syncedAt: syncedAt
+        )
+    }
+
+    private func normalizeMusicProvider(
+        _ item: [String: Any]?
+    ) -> LittleSpudMusicProvider? {
+        let id = dictString(item, "id")
+        guard !id.isEmpty else { return nil }
+        return LittleSpudMusicProvider(
+            id: id,
+            label: dictString(item, "label").ifEmpty(
+                id.replacingOccurrences(of: "_", with: " ").capitalized
+            ),
+            connected: dictBool(item, "connected") ?? false,
+            active: dictBool(item, "active") ?? false,
+            localPlayback: dictBool(item, "local_playback") ?? false
+        )
+    }
+
+    private func normalizeMusicTrack(
+        _ item: [String: Any]?
+    ) -> LittleSpudMusicTrack? {
+        let id = dictString(item, "id")
+        let title = dictString(item, "title")
+        guard !id.isEmpty, !title.isEmpty else { return nil }
+        let duration = doubleValue(item?["duration_seconds"]) ?? 0
+        let suppliedDuration = dictString(item, "duration_display")
+        let durationDisplay: String
+        if !suppliedDuration.isEmpty {
+            durationDisplay = suppliedDuration
+        } else if duration > 0 {
+            let seconds = Int(duration.rounded())
+            durationDisplay = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        } else {
+            durationDisplay = ""
+        }
+        return LittleSpudMusicTrack(
+            id: id,
+            title: title,
+            artist: dictString(item, "artist"),
+            albumArtist: dictString(item, "album_artist"),
+            album: dictString(item, "album"),
+            genre: dictString(item, "genre"),
+            durationSeconds: duration,
+            durationDisplay: durationDisplay,
+            provider: dictString(item, "provider"),
+            artworkURL: dictString(item, "artwork_url")
+        )
+    }
+
+    private func stringList(_ value: Any?) -> [String] {
+        (value as? [Any] ?? [])
+            .map { String(describing: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private func normalizeHistoryContent(
@@ -987,6 +1454,15 @@ private func intValue(_ value: Any?) -> Int {
         return int
     }
     return 0
+}
+
+private func doubleValue(_ value: Any?) -> Double? {
+    if let double = value as? Double { return double }
+    if let number = value as? NSNumber { return number.doubleValue }
+    if let string = value as? String {
+        return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return nil
 }
 
 private extension String {

@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Little Spud</string>
+    <string name="notification_channel_name">Little Spud alerts</string>
+    <string name="notification_channel_description">Notifications resolved securely from your paired Tater</string>
+</resources>

@@ -14,9 +14,22 @@ __pycache__/
 *.db
 *.pem
 *.p8
+*.p12
 *.key
+*.keystore
+*.jks
+*.mobileprovision
+*.provisionprofile
 FirebaseGateway/*.json
 FirebaseGateway/*.sqlite
 FirebaseGateway/*.sqlite3
 FirebaseGateway/*.db
 LittleSpud/GoogleService-Info.plist
+
+# Android
+android/.gradle/
+android/local.properties
+android/**/build/
+android/app/google-services.json
+*.apk
+*.aab
