@@ -1283,7 +1283,7 @@ final class SpudLinkAPI {
         guard
             var components = URLComponents(string: absolute),
             let path = components.url?.path,
-            path.hasPrefix("/api/spudlink/")
+            isSpudLinkAPIPath(path)
         else {
             return absolute
         }
@@ -1292,6 +1292,10 @@ final class SpudLinkAPI {
         queryItems.append(URLQueryItem(name: "token", value: session.token))
         components.queryItems = queryItems
         return components.url?.absoluteString ?? absolute
+    }
+
+    private func isSpudLinkAPIPath(_ path: String) -> Bool {
+        path.hasPrefix("/api/spudlink/") || path.contains("/api/spudlink/")
     }
 
     private func hubAPIURL(_ hubUrl: String, _ path: String) -> String {

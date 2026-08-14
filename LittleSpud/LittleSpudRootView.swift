@@ -4207,7 +4207,7 @@ private struct MessageBubble: View {
         guard
             var components = URLComponents(string: absolute),
             let path = components.url?.path,
-            path.hasPrefix("/api/spudlink/"),
+            isSpudLinkAPIPath(path),
             let token = model.session?.token,
             !token.isEmpty
         else {
@@ -4218,6 +4218,10 @@ private struct MessageBubble: View {
         queryItems.append(URLQueryItem(name: "token", value: token))
         components.queryItems = queryItems
         return components.url?.absoluteString ?? absolute
+    }
+
+    private func isSpudLinkAPIPath(_ path: String) -> Bool {
+        path.hasPrefix("/api/spudlink/") || path.contains("/api/spudlink/")
     }
 
     private func dedupeAttachments(_ attachments: [LittleSpudAttachment]) -> [LittleSpudAttachment] {

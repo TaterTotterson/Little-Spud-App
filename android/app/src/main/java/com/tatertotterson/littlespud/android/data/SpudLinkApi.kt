@@ -853,7 +853,7 @@ class SpudLinkApi(
         val raw = value.trim(); if (raw.isBlank()) return ""
         val absolute = if (raw.startsWith('/')) hubApiUrl(session.hubUrl, raw) else raw
         val uri = runCatching { Uri.parse(absolute) }.getOrNull() ?: return absolute
-        if (!uri.path.orEmpty().startsWith("/api/spudlink/")) return absolute
+        if (!isSpudLinkApiPath(uri.path.orEmpty())) return absolute
         return uri.buildUpon().clearQuery().apply {
             uri.queryParameterNames.filter { it != "token" }.forEach { key ->
                 uri.getQueryParameters(key).forEach { appendQueryParameter(key, it) }
@@ -861,6 +861,9 @@ class SpudLinkApi(
             appendQueryParameter("token", session.token)
         }.build().toString()
     }
+
+    private fun isSpudLinkApiPath(path: String): Boolean =
+        path.startsWith("/api/spudlink/") || path.contains("/api/spudlink/")
 
     private fun routeCandidates(session: LittleSpudSession, preferHome: Boolean): List<Pair<String, ConnectionRoute>> {
         val candidates = if (preferHome) listOf(
