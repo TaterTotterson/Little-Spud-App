@@ -53,6 +53,7 @@ class LittleSpudMessagingService : FirebaseMessagingService() {
             content = resolved.content,
             createdAt = resolved.createdAt,
             kind = "notification",
+            attachments = resolved.attachments,
             notificationTitle = resolved.title,
             notificationBody = resolved.message,
             notificationPriority = resolved.priority,

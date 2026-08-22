@@ -97,31 +97,56 @@ private struct PairingView: View {
 private struct ChatView: View {
     @EnvironmentObject private var model: LittleSpudViewModel
     @FocusState private var composerFocused: Bool
+    @State private var navigationOpen = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            ChatHeader()
-            Rectangle()
-                .fill(AppTheme.line)
-                .frame(height: 1)
-            TabView(selection: $model.activeLane) {
-                NotificationList()
-                    .tag(LittleSpudLane.notifications)
-
-                MessageList(composerFocused: composerFocused)
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        Composer(focused: $composerFocused)
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                VStack(spacing: 0) {
+                    ChatHeader {
+                        openNavigation()
                     }
-                    .tag(LittleSpudLane.chat)
+                    Rectangle()
+                        .fill(AppTheme.line)
+                        .frame(height: 1)
+                    laneContent
+                }
+                .disabled(navigationOpen)
+                .contentShape(Rectangle())
+                .simultaneousGesture(openNavigationGesture)
 
-                HomeRoomsView()
-                    .tag(LittleSpudLane.home)
+                if navigationOpen {
+                    Color.black.opacity(0.52)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            closeNavigation()
+                        }
+                        .transition(.opacity)
+                        .zIndex(1)
 
-                MusicPlayerView()
-                    .tag(LittleSpudLane.music)
+                    AppNavigationDrawer(
+                        onSelect: { lane in
+                            model.activeLane = lane
+                            closeNavigation()
+                        },
+                        onClose: closeNavigation
+                    )
+                    .frame(width: min(340, proxy.size.width * 0.86))
+                    .frame(maxHeight: .infinity)
+                    .transition(.move(edge: .leading))
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+                            .onEnded { value in
+                                if value.translation.width < -44,
+                                   abs(value.translation.width) > abs(value.translation.height) {
+                                    closeNavigation()
+                                }
+                            }
+                    )
+                    .zIndex(2)
+                }
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .indexViewStyle(.page(backgroundDisplayMode: .never))
         }
         .safeAreaInset(edge: .top) {
             Color.clear.frame(height: 1)
@@ -132,14 +157,64 @@ private struct ChatView: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var laneContent: some View {
+        switch model.activeLane {
+        case .notifications:
+            NotificationList()
+        case .chat:
+            MessageList(composerFocused: composerFocused)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Composer(focused: $composerFocused)
+                }
+        case .home:
+            HomeRoomsView()
+        case .music:
+            MusicPlayerView()
+        }
+    }
+
+    private func closeNavigation() {
+        withAnimation(.easeOut(duration: 0.22)) {
+            navigationOpen = false
+        }
+    }
+
+    private func openNavigation() {
+        withAnimation(.easeOut(duration: 0.22)) {
+            navigationOpen = true
+        }
+    }
+
+    private var openNavigationGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onEnded { value in
+                guard !navigationOpen,
+                      value.startLocation.x <= 64,
+                      value.translation.width > 44,
+                      abs(value.translation.width) > abs(value.translation.height) else {
+                    return
+                }
+                openNavigation()
+            }
+    }
 }
 
 private struct ChatHeader: View {
     @EnvironmentObject private var model: LittleSpudViewModel
     @State private var showSettings = false
+    let onOpenNavigation: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            Button(action: onOpenNavigation) {
+                Image(systemName: "line.3.horizontal")
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(SecondaryIconButtonStyle())
+            .accessibilityLabel("Open navigation menu")
+
             HeaderStatus()
             Spacer(minLength: 8)
             if model.activeLane == .notifications {
@@ -223,6 +298,145 @@ private struct ChatHeader: View {
         .sheet(isPresented: $showSettings) {
             LittleSpudSettingsView()
                 .environmentObject(model)
+        }
+    }
+}
+
+private struct AppNavigationDrawer: View {
+    @EnvironmentObject private var model: LittleSpudViewModel
+
+    let onSelect: (LittleSpudLane) -> Void
+    let onClose: () -> Void
+
+    private let lanes: [LittleSpudLane] = [.notifications, .chat, .home, .music]
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Image("TaterLogoPrimary")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 178)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .accessibilityLabel("Tater")
+
+                    HStack(spacing: 9) {
+                        Circle()
+                            .fill(model.hubConnected ? AppTheme.green : AppTheme.muted)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Little Spud")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(AppTheme.text)
+                            Text(model.connectionStatusText)
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 16)
+
+                    Rectangle()
+                        .fill(AppTheme.line)
+                        .frame(height: 1)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 10)
+
+                    ForEach(lanes, id: \.rawValue) { lane in
+                        drawerButton(for: lane)
+                    }
+
+                    Spacer(minLength: 24)
+                }
+            }
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(SecondaryIconButtonStyle())
+            .padding(.top, 10)
+            .padding(.trailing, 10)
+            .accessibilityLabel("Close navigation menu")
+        }
+        .background(AppTheme.panel)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(AppTheme.line)
+                .frame(width: 1)
+        }
+        .shadow(color: .black.opacity(0.42), radius: 20, x: 8, y: 0)
+    }
+
+    private func drawerButton(for lane: LittleSpudLane) -> some View {
+        let selected = model.activeLane == lane
+
+        return Button {
+            onSelect(lane)
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: laneIcon(lane))
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 24)
+                Text(laneTitle(lane))
+                    .font(.body.weight(selected ? .semibold : .medium))
+                Spacer()
+                if lane == .notifications, model.notificationUnreadCount > 0 {
+                    Text(String(min(model.notificationUnreadCount, 99)))
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppTheme.accent2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(AppTheme.accent.opacity(0.14), in: Capsule())
+                }
+            }
+            .foregroundStyle(selected ? AppTheme.text : AppTheme.muted)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .background(
+                selected ? AppTheme.accent.opacity(0.15) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 14)
+            )
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(AppTheme.accent.opacity(0.38), lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func laneTitle(_ lane: LittleSpudLane) -> String {
+        switch lane {
+        case .notifications:
+            return "Notifications"
+        case .chat:
+            return "Chat"
+        case .home:
+            return "Home"
+        case .music:
+            return "Music"
+        }
+    }
+
+    private func laneIcon(_ lane: LittleSpudLane) -> String {
+        switch lane {
+        case .notifications:
+            return "bell.fill"
+        case .chat:
+            return "bubble.left.and.bubble.right.fill"
+        case .home:
+            return "house.fill"
+        case .music:
+            return "music.note"
         }
     }
 }
@@ -604,16 +818,18 @@ private struct NotificationCard: View {
     }
 
     private var bodyText: String {
-        let explicit = message.notificationBody?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !explicit.isEmpty {
-            return explicit
-        }
-        guard let divider = message.content.range(of: "\n\n") else {
-            return message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return String(message.content[divider.upperBound...])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        message.notificationDisplayBody
+    }
+
+    private var faceIDSummary: String? {
+        message.notificationFaceIDSummary
+    }
+
+    private var faceIDAccent: Color {
+        guard let faceIDSummary else { return AppTheme.accent2 }
+        return faceIDSummary.localizedCaseInsensitiveContains("recognized")
+            ? AppTheme.green
+            : AppTheme.accent2
     }
 
     private var isUrgent: Bool {
@@ -699,8 +915,32 @@ private struct NotificationCard: View {
                 }
             }
 
+            if let faceIDSummary {
+                HStack(spacing: 8) {
+                    Image(
+                        systemName: faceIDSummary.localizedCaseInsensitiveContains("recognized")
+                            ? "person.crop.circle.badge.checkmark"
+                            : "person.crop.circle.badge.questionmark"
+                    )
+                    .font(.system(size: 16, weight: .semibold))
+                    Text(faceIDSummary)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(faceIDAccent)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .background(faceIDAccent.opacity(0.1), in: RoundedRectangle(cornerRadius: 11))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(faceIDAccent.opacity(0.24), lineWidth: 1)
+                )
+                .accessibilityLabel("Face ID: \(faceIDSummary)")
+            }
+
             if !message.attachments.isEmpty {
-                MediaAttachmentGrid(attachments: message.attachments)
+                MediaAttachmentGrid(attachments: message.attachments, compact: true)
             }
         }
         .padding(16)
@@ -798,32 +1038,120 @@ private struct HomeOverviewStat: Identifiable {
     }
 }
 
-private struct HomeOverviewStrip: View {
+private struct HomeOverviewCard: View {
     let stats: [HomeOverviewStat]
     @State private var selectedStat: HomeOverviewStat?
 
+    private var prioritizedStats: [HomeOverviewStat] {
+        stats.enumerated().sorted { lhs, rhs in
+            let lhsPriority = priority(for: lhs.element)
+            let rhsPriority = priority(for: rhs.element)
+            return lhsPriority == rhsPriority ? lhs.offset < rhs.offset : lhsPriority < rhsPriority
+        }.map(\.element)
+    }
+
+    private var hasSafetyAlert: Bool {
+        stats.contains { ["leak", "doors", "locks"].contains($0.id) }
+    }
+
+    private var hasMotion: Bool {
+        stats.contains { $0.id == "motion" }
+    }
+
+    private var statusTitle: String {
+        if hasSafetyAlert { return "Attention" }
+        if hasMotion { return "Activity" }
+        return "Live"
+    }
+
+    private var statusColor: Color {
+        hasSafetyAlert ? AppTheme.danger : (hasMotion ? AppTheme.accent2 : AppTheme.green)
+    }
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 9) {
-                ForEach(stats) { stat in
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 10) {
+                Image(systemName: "house.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(AppTheme.accent)
+                    .frame(width: 34, height: 34)
+                    .background(AppTheme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Home snapshot")
+                        .font(.subheadline.weight(.bold))
+                    Text(hasSafetyAlert ? "Check the highlighted items" : "Live from your Tater")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusTitle)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(statusColor)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(statusColor.opacity(0.11), in: Capsule())
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ],
+                spacing: 8
+            ) {
+                ForEach(prioritizedStats) { stat in
                     if stat.contributors.isEmpty {
-                        HomeOverviewChip(stat: stat)
+                        HomeOverviewMetric(stat: stat)
                     } else {
                         Button {
                             selectedStat = stat
                         } label: {
-                            HomeOverviewChip(stat: stat, showsInfo: true)
+                            HomeOverviewMetric(stat: stat, showsInfo: true)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityHint("Shows the readings used for this average")
+                        .accessibilityHint("Shows more details")
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(13)
+        .background(
+            LinearGradient(
+                colors: [AppTheme.panelRaised, AppTheme.panel],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(AppTheme.accent.opacity(0.2), lineWidth: 1)
+        )
         .accessibilityElement(children: .contain)
         .sheet(item: $selectedStat) { stat in
             HomeOverviewDetailsSheet(stat: stat)
+        }
+    }
+
+    private func priority(for stat: HomeOverviewStat) -> Int {
+        switch stat.id {
+        case "leak": return 0
+        case "doors": return 1
+        case "locks": return 2
+        case "motion": return 3
+        case "lights": return 4
+        case "fans": return 5
+        case let id where id.hasPrefix("temperature-"): return 6
+        case "humidity": return 7
+        default: return 8
         }
     }
 }
@@ -893,39 +1221,40 @@ private struct PillFlowLayout: Layout {
     }
 }
 
-private struct HomeOverviewChip: View {
+private struct HomeOverviewMetric: View {
     let stat: HomeOverviewStat
     var showsInfo = false
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 8) {
             Image(systemName: stat.symbol)
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(stat.color)
-                .frame(width: 28, height: 28)
-                .background(stat.color.opacity(0.13), in: Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(stat.value)
-                        .font(.subheadline.monospacedDigit().weight(.bold))
-                    if showsInfo {
-                        Image(systemName: "info.circle.fill")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(AppTheme.muted)
-                    }
-                }
+                .frame(width: 27, height: 27)
+                .background(stat.color.opacity(0.13), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(stat.value)
+                    .font(.subheadline.monospacedDigit().weight(.bold))
+                    .lineLimit(1)
                 Text(stat.label)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(AppTheme.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if showsInfo {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
             }
         }
-        .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
-        .background(AppTheme.panelRaised, in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(AppTheme.line, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(stat.color.opacity(0.16), lineWidth: 1)
         )
     }
 }
@@ -1361,7 +1690,7 @@ private struct HomeRoomsView: View {
                         EmptyHomeView()
                     } else {
                         if !overviewStats.isEmpty {
-                            HomeOverviewStrip(stats: overviewStats)
+                            HomeOverviewCard(stats: overviewStats)
                         }
                         ForEach(model.homeRooms) { room in
                             NavigationLink {
@@ -2661,6 +2990,7 @@ private struct MusicRecommendationCard: View {
         HStack(spacing: 13) {
             MusicArtworkView(
                 url: model.musicArtworkURL(for: recommendation),
+                cacheKey: model.musicArtworkCacheKey(for: recommendation),
                 size: 76,
                 cornerRadius: 15,
                 symbol: "sparkles"
@@ -2716,6 +3046,7 @@ private struct MusicPersistentPlayer: View {
                 Button(action: openQueue) {
                     MusicArtworkView(
                         url: model.musicArtworkURL(for: model.musicCurrentTrack),
+                        cacheKey: model.musicArtworkCacheKey(for: model.musicCurrentTrack),
                         size: 46,
                         cornerRadius: 11,
                         symbol: isPlaying ? "waveform" : "music.note"
@@ -2747,25 +3078,37 @@ private struct MusicPersistentPlayer: View {
                         .font(.caption.weight(.bold))
                         .frame(width: 30, height: 34)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MusicTransportPressStyle())
                 .foregroundStyle(AppTheme.text)
+                .disabled(model.musicCurrentTrack == nil || model.musicTransportLoading)
 
                 Button { model.toggleMusicPlayback() } label: {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(AppTheme.background)
-                        .frame(width: 38, height: 38)
-                        .background(AppTheme.accent2, in: Circle())
+                    ZStack {
+                        Circle().fill(AppTheme.accent2)
+                        if model.musicTransportLoading {
+                            ProgressView()
+                                .tint(AppTheme.background)
+                                .scaleEffect(0.72)
+                        } else {
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(AppTheme.background)
+                        }
+                    }
+                    .frame(width: 38, height: 38)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MusicTransportPressStyle())
+                .disabled(model.musicCurrentTrack == nil || model.musicTransportLoading)
+                .accessibilityLabel(model.musicTransportLoading ? "Playback command in progress" : isPlaying ? "Pause" : "Play")
 
                 Button { model.skipMusic(1) } label: {
                     Image(systemName: "forward.fill")
                         .font(.caption.weight(.bold))
                         .frame(width: 30, height: 34)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MusicTransportPressStyle())
                 .foregroundStyle(AppTheme.text)
+                .disabled(model.musicCurrentTrack == nil || model.musicTransportLoading)
 
                 Button(action: openQueue) {
                     Image(systemName: "chevron.up")
@@ -2939,6 +3282,7 @@ private struct MusicExpandablePlayer: View {
                 HStack(spacing: 12) {
                     MusicArtworkView(
                         url: model.musicArtworkURL(for: model.musicCurrentTrack),
+                        cacheKey: model.musicArtworkCacheKey(for: model.musicCurrentTrack),
                         size: 62,
                         cornerRadius: 13,
                         symbol: isPlaying ? "waveform" : "music.note"
@@ -2967,6 +3311,7 @@ private struct MusicExpandablePlayer: View {
                 HStack(spacing: 10) {
                     MusicArtworkView(
                         url: model.musicArtworkURL(for: model.musicCurrentTrack),
+                        cacheKey: model.musicArtworkCacheKey(for: model.musicCurrentTrack),
                         size: 48,
                         cornerRadius: 10,
                         symbol: isPlaying ? "waveform" : "music.note"
@@ -2994,7 +3339,8 @@ private struct MusicExpandablePlayer: View {
                             symbol: isPlaying ? "pause.fill" : "play.fill",
                             label: isPlaying ? "Pause" : model.musicPlaybackStatus == "paused" ? "Resume" : "Play",
                             size: 42,
-                            prominent: true
+                            prominent: true,
+                            isLoading: model.musicTransportLoading
                         ) {
                             model.toggleMusicPlayback()
                         }
@@ -3002,7 +3348,7 @@ private struct MusicExpandablePlayer: View {
                             model.skipMusic(1)
                         }
                     }
-                    .disabled(model.musicCurrentTrack == nil)
+                    .disabled(model.musicCurrentTrack == nil || model.musicTransportLoading)
                     .opacity(model.musicCurrentTrack == nil ? 0.45 : 1)
                 }
                 .padding(.horizontal, 12)
@@ -3021,7 +3367,8 @@ private struct MusicExpandablePlayer: View {
                         symbol: isPlaying ? "pause.fill" : "play.fill",
                         label: isPlaying ? "Pause" : model.musicPlaybackStatus == "paused" ? "Resume" : "Play",
                         size: 48,
-                        prominent: true
+                        prominent: true,
+                        isLoading: model.musicTransportLoading
                     ) {
                         model.toggleMusicPlayback()
                     }
@@ -3033,7 +3380,7 @@ private struct MusicExpandablePlayer: View {
                     }
                 }
                 .padding(.vertical, 5)
-                .disabled(model.musicCurrentTrack == nil)
+                .disabled(model.musicCurrentTrack == nil || model.musicTransportLoading)
                 .opacity(model.musicCurrentTrack == nil ? 0.65 : 1)
 
                 HStack(spacing: 8) {
@@ -3182,39 +3529,49 @@ private struct MusicQueueTrackRow: View {
     let isCurrent: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text("\(index + 1)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(isCurrent ? AppTheme.accent2 : AppTheme.muted)
-                .frame(width: 24, alignment: .trailing)
-            MusicArtworkView(
-                url: model.musicArtworkURL(for: track),
-                size: 38,
-                cornerRadius: 9,
-                symbol: isCurrent ? "waveform" : "music.note"
-            )
-            VStack(alignment: .leading, spacing: 2) {
-                Text(track.title)
-                    .font(.subheadline.weight(isCurrent ? .semibold : .regular))
-                    .foregroundStyle(AppTheme.text)
-                    .lineLimit(1)
-                Text(track.displayArtist)
-                    .font(.caption)
+        Button {
+            model.playMusicQueueTrack(at: index)
+        } label: {
+            HStack(spacing: 10) {
+                Text("\(index + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(isCurrent ? AppTheme.accent2 : AppTheme.muted)
+                    .frame(width: 24, alignment: .trailing)
+                MusicArtworkView(
+                    url: model.musicArtworkURL(for: track),
+                    cacheKey: model.musicArtworkCacheKey(for: track),
+                    size: 38,
+                    cornerRadius: 9,
+                    symbol: isCurrent ? "waveform" : "music.note"
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.title)
+                        .font(.subheadline.weight(isCurrent ? .semibold : .regular))
+                        .foregroundStyle(AppTheme.text)
+                        .lineLimit(1)
+                    Text(track.displayArtist)
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text(track.durationDisplay)
+                    .font(.caption2.monospacedDigit())
                     .foregroundStyle(AppTheme.muted)
-                    .lineLimit(1)
             }
-            Spacer(minLength: 6)
-            Text(track.durationDisplay)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(AppTheme.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+            .background(isCurrent ? AppTheme.accent.opacity(0.12) : AppTheme.panel, in: RoundedRectangle(cornerRadius: 13))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13)
+                    .stroke(isCurrent ? AppTheme.accent.opacity(0.5) : AppTheme.line, lineWidth: 1)
+            )
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(isCurrent ? AppTheme.accent.opacity(0.12) : AppTheme.panel, in: RoundedRectangle(cornerRadius: 13))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13)
-                .stroke(isCurrent ? AppTheme.accent.opacity(0.5) : AppTheme.line, lineWidth: 1)
-        )
+        .buttonStyle(.plain)
+        .disabled(model.musicLoading)
+        .accessibilityLabel("Play \(track.title) by \(track.displayArtist)")
+        .accessibilityHint(isCurrent ? "Restarts the current song" : "Skips to this song")
     }
 }
 
@@ -3284,24 +3641,22 @@ private struct MusicPlayerDestinationSheet: View {
 
 private struct MusicArtworkView: View {
     let url: URL?
+    let cacheKey: String
     let size: CGFloat
     let cornerRadius: CGFloat
     let symbol: String
+    @State private var image: UIImage?
 
     var body: some View {
         Group {
-            if let url {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else if phase.error != nil {
-                        placeholder
-                    } else {
-                        ZStack {
-                            placeholder
-                            ProgressView().tint(AppTheme.background)
-                        }
-                    }
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if url != nil {
+                ZStack {
+                    placeholder
+                    ProgressView().tint(AppTheme.background)
                 }
             } else {
                 placeholder
@@ -3309,6 +3664,14 @@ private struct MusicArtworkView: View {
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .task(id: "\(cacheKey)|\(url?.absoluteString ?? "")") {
+            image = nil
+            guard let url else { return }
+            image = await LittleSpudMusicArtworkCache.shared.image(
+                for: url,
+                cacheKey: cacheKey
+            )
+        }
     }
 
     private var placeholder: some View {
@@ -3385,7 +3748,8 @@ private struct MusicNowPlayingCard: View {
                     symbol: isPlaying ? "pause.fill" : "play.fill",
                     label: isPlaying ? "Pause" : model.musicPlaybackStatus == "paused" ? "Resume" : "Play",
                     size: 54,
-                    prominent: true
+                    prominent: true,
+                    isLoading: model.musicTransportLoading
                 ) {
                     model.toggleMusicPlayback()
                 }
@@ -3430,24 +3794,40 @@ private struct MusicTransportButton: View {
     let label: String
     let size: CGFloat
     var prominent = false
+    var isLoading = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: prominent ? 18 : 14, weight: .bold))
-                .foregroundStyle(prominent ? AppTheme.background : AppTheme.text)
-                .frame(width: size, height: size)
-                .background(
-                    prominent ? AppTheme.accent2 : AppTheme.panelRaised,
-                    in: Circle()
-                )
-                .overlay(
-                    Circle().stroke(prominent ? Color.clear : AppTheme.line, lineWidth: 1)
-                )
+            ZStack {
+                Circle()
+                    .fill(prominent ? AppTheme.accent2 : AppTheme.panelRaised)
+                if isLoading {
+                    ProgressView()
+                        .tint(prominent ? AppTheme.background : AppTheme.text)
+                        .scaleEffect(size >= 48 ? 0.82 : 0.68)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: prominent ? 18 : 14, weight: .bold))
+                        .foregroundStyle(prominent ? AppTheme.background : AppTheme.text)
+                }
+            }
+            .frame(width: size, height: size)
+            .overlay(
+                Circle().stroke(prominent ? Color.clear : AppTheme.line, lineWidth: 1)
+            )
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
+        .buttonStyle(MusicTransportPressStyle())
+        .accessibilityLabel(isLoading ? "Playback command in progress" : label)
+    }
+}
+
+private struct MusicTransportPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -3466,6 +3846,7 @@ private struct MusicTrackRow: View {
             HStack(spacing: 12) {
                 MusicArtworkView(
                     url: model.musicArtworkURL(for: track),
+                    cacheKey: model.musicArtworkCacheKey(for: track),
                     size: 44,
                     cornerRadius: 11,
                     symbol: isCurrent ? "waveform" : "music.note"
@@ -4288,12 +4669,23 @@ private struct StreamingMessageText: View {
 
 private struct MediaAttachmentGrid: View {
     let attachments: [LittleSpudAttachment]
+    var compact = false
+
+    private var visibleAttachments: [LittleSpudAttachment] {
+        compact ? Array(attachments.prefix(1)) : attachments
+    }
 
     var body: some View {
         if !attachments.isEmpty {
             VStack(spacing: 8) {
-                ForEach(attachments) { attachment in
-                    MediaAttachmentCard(attachment: attachment)
+                ForEach(visibleAttachments) { attachment in
+                    MediaAttachmentCard(attachment: attachment, compact: compact)
+                }
+                if compact && attachments.count > visibleAttachments.count {
+                    Text("+\(attachments.count - visibleAttachments.count) more attachment\(attachments.count - visibleAttachments.count == 1 ? "" : "s")")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(AppTheme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -4309,6 +4701,7 @@ private enum MediaAttachmentKind: Equatable {
 
 private struct MediaAttachmentCard: View {
     let attachment: LittleSpudAttachment
+    var compact = false
 
     private var remoteURL: URL? {
         URL(string: attachment.previewUrl)
@@ -4350,7 +4743,7 @@ private struct MediaAttachmentCard: View {
             if mediaKind == .image {
                 imageBody
             } else if mediaKind == .video, let remoteURL {
-                InlineVideoPlayerView(url: remoteURL)
+                InlineVideoPlayerView(url: remoteURL, height: compact ? 132 : 190)
             } else if mediaKind == .audio, let remoteURL {
                 InlineAudioPlayerView(
                     url: remoteURL,
@@ -4378,22 +4771,41 @@ private struct MediaAttachmentCard: View {
     @ViewBuilder
     private var imageBody: some View {
         if let imageFromDataURL {
-            Image(uiImage: imageFromDataURL)
-                .resizable()
-                .scaledToFit()
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            if compact {
+                Image(uiImage: imageFromDataURL)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 132)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Image(uiImage: imageFromDataURL)
+                    .resizable()
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
         } else if let remoteURL {
             AsyncImage(url: remoteURL) { phase in
                 switch phase {
                 case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFit()
+                    if compact {
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 132)
+                            .clipped()
+                    } else {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    }
                 case .failure:
                     fileBody
                 case .empty:
                     ProgressView()
-                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .frame(maxWidth: .infinity, minHeight: compact ? 132 : 120)
                 @unknown default:
                     EmptyView()
                 }
@@ -4451,6 +4863,7 @@ private struct MediaAttachmentCard: View {
 
 private struct InlineVideoPlayerView: View {
     let url: URL
+    var height: CGFloat = 190
     @State private var player: AVPlayer?
 
     var body: some View {
@@ -4459,10 +4872,10 @@ private struct InlineVideoPlayerView: View {
                 VideoPlayer(player: player)
             } else {
                 ProgressView()
-                .frame(maxWidth: .infinity, minHeight: 190)
+                .frame(maxWidth: .infinity, minHeight: height)
             }
         }
-        .frame(height: 190)
+        .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onAppear {
             configurePlayer()

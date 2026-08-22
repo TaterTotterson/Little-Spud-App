@@ -3,6 +3,7 @@ package com.tatertotterson.littlespud.android.model
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.util.Locale
 import java.util.UUID
 
 enum class LittleSpudRole(val wireName: String) {
@@ -159,6 +160,32 @@ data class LittleSpudMessage(
     val notificationBody: String? = null,
     val notificationPriority: String? = null,
 ) {
+    val notificationDisplayBody: String
+        get() = notificationBodyParts().first
+
+    val notificationFaceIdSummary: String?
+        get() = notificationBodyParts().second.ifBlank { null }
+
+    private fun notificationBodyParts(): Pair<String, String> {
+        val explicitBody = notificationBody.orEmpty().trim()
+        val rawBody = when {
+            explicitBody.isNotBlank() -> explicitBody
+            content.contains("\n\n") -> content.substringAfter("\n\n")
+            else -> content
+        }
+        var faceSummary = ""
+        val bodyLines = rawBody.lines().filterNot { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("Face ID:", ignoreCase = true)) {
+                faceSummary = trimmed.substringAfter(':').trim().trimEnd('.')
+                true
+            } else {
+                false
+            }
+        }
+        return bodyLines.joinToString("\n").trim() to faceSummary
+    }
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("role", role.wireName); put("content", content); put("createdAt", createdAt)
         put("kind", kind ?: JSONObject.NULL)
@@ -225,6 +252,7 @@ data class HubNotification(
     val message: String,
     val createdAt: Long,
     val priority: String,
+    val attachments: List<LittleSpudAttachment> = emptyList(),
 ) {
     val content: String get() = when {
         title.isNotBlank() && message.isNotBlank() -> "$title\n\n$message"
@@ -292,6 +320,22 @@ data class MusicTrack(
 ) {
     val displayArtist: String get() = artist.ifBlank { albumArtist }
     val subtitle: String get() = listOf(displayArtist, album).filter { it.isNotBlank() }.joinToString(" · ")
+    val artworkCacheKey: String
+        get() {
+            val cleanAlbum = normalizeArtworkIdentity(album)
+            if (cleanAlbum.isNotBlank()) {
+                val cleanArtist = normalizeArtworkIdentity(albumArtist.ifBlank { displayArtist })
+                return "album:${normalizeArtworkIdentity(provider)}:$cleanArtist:$cleanAlbum"
+            }
+            val cleanArtwork = artworkUrl.trim()
+            if (cleanArtwork.isNotBlank()) return "artwork:$cleanArtwork"
+            return "track:${normalizeArtworkIdentity(provider)}:$id"
+        }
+
+    private fun normalizeArtworkIdentity(value: String): String = value
+        .trim()
+        .lowercase(Locale.ROOT)
+        .replace(Regex("\\s+"), " ")
 }
 
 data class MusicRecommendation(

@@ -4,22 +4,29 @@ package com.tatertotterson.littlespud.android.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Build
 import android.util.Base64
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -29,8 +36,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -38,10 +43,16 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
@@ -51,12 +62,16 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -68,11 +83,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,12 +101,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import coil3.compose.AsyncImage
@@ -95,6 +119,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.tatertotterson.littlespud.android.BuildConfig
+import com.tatertotterson.littlespud.android.R
 import com.tatertotterson.littlespud.android.model.LittleSpudAttachment
 import com.tatertotterson.littlespud.android.model.LittleSpudLane
 import com.tatertotterson.littlespud.android.model.LittleSpudMessage
@@ -106,6 +131,9 @@ import com.tatertotterson.littlespud.android.ui.theme.SpudMuted
 import com.tatertotterson.littlespud.android.ui.theme.SpudOrange
 import com.tatertotterson.littlespud.android.ui.theme.SpudPanel
 import com.tatertotterson.littlespud.android.ui.theme.SpudPanelRaised
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 
@@ -205,6 +233,8 @@ private fun PairingScreen(state: LittleSpudUiState, model: LittleSpudViewModel) 
 @Composable
 private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
     val focusManager = LocalFocusManager.current
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     val lanes = remember {
         listOf(
             LittleSpudLane.NOTIFICATIONS,
@@ -213,62 +243,123 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
             LittleSpudLane.MUSIC,
         )
     }
-    val pagerState = rememberPagerState(
-        initialPage = lanes.indexOf(state.activeLane).coerceAtLeast(0),
-        pageCount = { lanes.size },
-    )
 
-    LaunchedEffect(state.activeLane) {
-        val targetPage = lanes.indexOf(state.activeLane)
-        if (targetPage >= 0 && pagerState.currentPage != targetPage) {
-            pagerState.animateScrollToPage(targetPage)
-        }
-    }
-    LaunchedEffect(pagerState.settledPage) {
-        lanes.getOrNull(pagerState.settledPage)?.let { lane ->
-            if (lane != LittleSpudLane.CHAT) focusManager.clearFocus()
-            if (lane != state.activeLane) model.selectLane(lane)
-        }
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = MaterialTheme.colorScheme.background,
+                drawerContentColor = MaterialTheme.colorScheme.onBackground,
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.tater_logo_primary),
+                    contentDescription = "Tater",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(174.dp)
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    contentScale = ContentScale.Fit,
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (state.hubConnected) SpudGreen else SpudMuted),
+                    )
+                    Spacer(Modifier.width(8.dp))
                     Column {
+                        Text("Little Spud", fontWeight = FontWeight.Bold)
                         Text(
-                            when (state.activeLane) {
-                                LittleSpudLane.NOTIFICATIONS -> "Notifications"
-                                LittleSpudLane.CHAT -> state.assistantName
-                                LittleSpudLane.HOME -> "Home"
-                                LittleSpudLane.MUSIC -> "Music Core"
-                            },
-                            fontWeight = FontWeight.Bold,
+                            state.connectionText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SpudMuted,
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(7.dp).clip(CircleShape).background(if (state.hubConnected) SpudGreen else SpudMuted))
-                            Spacer(Modifier.width(6.dp))
-                            Text(state.connectionText, style = MaterialTheme.typography.labelSmall, color = SpudMuted)
-                        }
                     }
-                },
-                actions = { IconButton(onClick = { model.showSettings(true) }) { Icon(Icons.Default.Settings, "Settings") } },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
+                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = SpudMuted.copy(alpha = 0.22f),
+                )
+                lanes.forEach { lane ->
+                    val destination = when (lane) {
+                        LittleSpudLane.NOTIFICATIONS -> "Notifications" to Icons.Default.Notifications
+                        LittleSpudLane.CHAT -> "Chat" to Icons.Default.ChatBubble
+                        LittleSpudLane.HOME -> "Home" to Icons.Default.Home
+                        LittleSpudLane.MUSIC -> "Music" to Icons.Default.MusicNote
+                    }
+                    NavigationDrawerItem(
+                        label = {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(destination.first, modifier = Modifier.weight(1f))
+                                if (lane == LittleSpudLane.NOTIFICATIONS && state.notificationUnreadCount > 0) {
+                                    Text(
+                                        state.notificationUnreadCount.coerceAtMost(99).toString(),
+                                        color = SpudOrange,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                            }
+                        },
+                        selected = lane == state.activeLane,
+                        onClick = {
+                            if (lane != LittleSpudLane.CHAT) focusManager.clearFocus()
+                            model.selectLane(lane)
+                            scope.launch { drawerState.close() }
+                        },
+                        icon = { Icon(destination.second, null) },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                    )
+                }
+            }
         },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { padding ->
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize().padding(padding),
-            beyondViewportPageCount = lanes.lastIndex,
-            key = { page -> lanes[page] },
-        ) { page ->
-            when (lanes[page]) {
-                LittleSpudLane.NOTIFICATIONS -> NotificationsScreen(state)
-                LittleSpudLane.CHAT -> ChatScreen(state, model)
-                LittleSpudLane.HOME -> HomeScreen(state, model)
-                LittleSpudLane.MUSIC -> MusicScreen(state, model)
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                when (state.activeLane) {
+                                    LittleSpudLane.NOTIFICATIONS -> "Notifications"
+                                    LittleSpudLane.CHAT -> state.assistantName
+                                    LittleSpudLane.HOME -> "Home"
+                                    LittleSpudLane.MUSIC -> "Music Core"
+                                },
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(7.dp).clip(CircleShape).background(if (state.hubConnected) SpudGreen else SpudMuted))
+                                Spacer(Modifier.width(6.dp))
+                                Text(state.connectionText, style = MaterialTheme.typography.labelSmall, color = SpudMuted)
+                            }
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, "Open navigation menu")
+                        }
+                    },
+                    actions = { IconButton(onClick = { model.showSettings(true) }) { Icon(Icons.Default.Settings, "Settings") } },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                )
+            },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                when (state.activeLane) {
+                    LittleSpudLane.NOTIFICATIONS -> NotificationsScreen(state)
+                    LittleSpudLane.CHAT -> ChatScreen(state, model)
+                    LittleSpudLane.HOME -> HomeScreen(state, model)
+                    LittleSpudLane.MUSIC -> MusicScreen(state, model)
+                }
             }
         }
     }
@@ -278,7 +369,9 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
 @Composable
 private fun ChatScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val listState = rememberLazyListState()
+    val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(model::addAttachment) }
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) model.toggleVoiceInput()
@@ -286,6 +379,11 @@ private fun ChatScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
     }
     LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content?.length) {
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+    }
+    LaunchedEffect(keyboardVisible) {
+        if (keyboardVisible && state.messages.isNotEmpty()) {
+            listState.scrollToItem(state.messages.lastIndex)
+        }
     }
     Column(Modifier.fillMaxSize().imePadding()) {
         if (state.statusText.isNotBlank() && state.statusIsError) {
@@ -445,8 +543,15 @@ private fun AttachmentView(attachment: LittleSpudAttachment) {
 
 @Composable
 private fun NotificationsScreen(state: LittleSpudUiState) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(state.notifications.size) {
+        if (state.notifications.isNotEmpty()) {
+            listState.scrollToItem(state.notifications.lastIndex)
+        }
+    }
     LazyColumn(
-        Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
+        state = listState,
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -458,8 +563,10 @@ private fun NotificationsScreen(state: LittleSpudUiState) {
                 Text("Tater alerts will appear here.", color = SpudMuted)
             }
         }
-        items(state.notifications.reversed(), key = { it.id }) { notification ->
+        items(state.notifications, key = { it.id }) { notification ->
             val urgent = notification.notificationPriority.equals("urgent", true) || notification.notificationPriority.equals("high", true)
+            val faceIdSummary = notification.notificationFaceIdSummary
+            val faceIdColor = if (faceIdSummary?.contains("recognized", ignoreCase = true) == true) SpudGreen else SpudOrange
             Card(
                 colors = CardDefaults.cardColors(containerColor = if (urgent) SpudDanger.copy(alpha = 0.13f) else SpudPanel),
                 modifier = Modifier.fillMaxWidth(),
@@ -469,10 +576,231 @@ private fun NotificationsScreen(state: LittleSpudUiState) {
                         Text(notification.notificationTitle?.ifBlank { "Little Spud" } ?: "Little Spud", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                         if (urgent) Text("URGENT", style = MaterialTheme.typography.labelSmall, color = SpudDanger, fontWeight = FontWeight.Black)
                     }
-                    Text(notification.notificationBody?.ifBlank { notification.content } ?: notification.content)
+                    if (notification.notificationDisplayBody.isNotBlank()) {
+                        Text(notification.notificationDisplayBody)
+                    }
+                    if (faceIdSummary != null) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(faceIdColor.copy(alpha = 0.1f))
+                                .padding(horizontal = 11.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Default.Face, null, Modifier.size(18.dp), tint = faceIdColor)
+                            Text(
+                                faceIdSummary,
+                                color = faceIdColor,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
                     Text(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(notification.createdAt)), style = MaterialTheme.typography.labelSmall, color = SpudMuted)
-                    notification.attachments.forEach { AttachmentView(it) }
+                    NotificationAttachmentPreview(notification.attachments)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationAttachmentPreview(attachments: List<LittleSpudAttachment>) {
+    val attachment = attachments.firstOrNull() ?: return
+    val dataBitmap = remember(attachment.dataUrl) {
+        attachment.dataUrl.takeIf { it.startsWith("data:image") }
+            ?.substringAfter("base64,", "")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { encoded ->
+                runCatching {
+                    val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }.getOrNull()
+            }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        when {
+            attachment.previewUrl.isNotBlank() && attachment.type.startsWith("video/") -> NotificationVideoPreview(
+                url = attachment.previewUrl,
+                title = attachment.displayName,
+                suppliedSnapshot = dataBitmap,
+            )
+            dataBitmap != null -> Image(
+                bitmap = dataBitmap,
+                contentDescription = attachment.displayName,
+                modifier = Modifier.fillMaxWidth().height(138.dp).clip(RoundedCornerShape(12.dp)),
+                contentScale = ContentScale.Crop,
+            )
+            attachment.previewUrl.isNotBlank() && attachment.type.startsWith("image/") -> AsyncImage(
+                model = attachment.previewUrl,
+                contentDescription = attachment.displayName,
+                modifier = Modifier.fillMaxWidth().height(138.dp).clip(RoundedCornerShape(12.dp)),
+                contentScale = ContentScale.Crop,
+            )
+            else -> AttachmentView(attachment)
+        }
+        if (attachments.size > 1) {
+            Text(
+                "+${attachments.size - 1} more attachment${if (attachments.size == 2) "" else "s"}",
+                color = SpudMuted,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NotificationVideoPreview(
+    url: String,
+    title: String,
+    suppliedSnapshot: androidx.compose.ui.graphics.ImageBitmap?,
+) {
+    var fullScreen by rememberSaveable(url) { mutableStateOf(false) }
+    val extractedSnapshot by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = url,
+        key2 = suppliedSnapshot,
+    ) {
+        if (suppliedSnapshot != null) return@produceState
+        value = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(url, emptyMap())
+                retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?.asImageBitmap()
+            } catch (_: Exception) {
+                null
+            } finally {
+                retriever.release()
+            }
+        }
+    }
+    val snapshot = suppliedSnapshot ?: extractedSnapshot
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(138.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black)
+            .clickable { fullScreen = true },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (snapshot != null) {
+            Image(
+                bitmap = snapshot,
+                contentDescription = title.ifBlank { "Video clip snapshot" },
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        Row(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(9.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.Black.copy(alpha = 0.72f))
+                .padding(horizontal = 9.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(Icons.Default.PlayCircle, null, Modifier.size(18.dp), tint = SpudOrange)
+            Text(
+                title.ifBlank { "Play video clip" },
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    if (fullScreen) {
+        FullScreenNotificationVideo(
+            url = url,
+            title = title,
+            onDismiss = { fullScreen = false },
+        )
+    }
+}
+
+@Composable
+private fun FullScreenNotificationVideo(
+    url: String,
+    title: String,
+    onDismiss: () -> Unit,
+) {
+    var videoView by remember(url) { mutableStateOf<VideoView?>(null) }
+    DisposableEffect(url) {
+        onDispose {
+            videoView?.stopPlayback()
+            videoView = null
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                factory = { context ->
+                    VideoView(context).apply {
+                        val controls = MediaController(context)
+                        controls.setAnchorView(this)
+                        setMediaController(controls)
+                        keepScreenOn = true
+                        tag = url
+                        setVideoURI(Uri.parse(url))
+                        setOnPreparedListener {
+                            start()
+                            controls.show()
+                        }
+                        videoView = this
+                    }
+                },
+                update = { view ->
+                    if (view.tag != url) {
+                        view.tag = url
+                        view.setVideoURI(Uri.parse(url))
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            if (title.isNotBlank()) {
+                Text(
+                    title,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .padding(start = 18.dp, top = 14.dp, end = 70.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                )
+            }
+
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(10.dp)
+                    .background(Color.Black.copy(alpha = 0.65f), CircleShape),
+            ) {
+                Icon(Icons.Default.Close, "Close video", tint = Color.White)
             }
         }
     }

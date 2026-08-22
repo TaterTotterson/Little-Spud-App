@@ -2,6 +2,7 @@ package com.tatertotterson.littlespud.android.ui
 
 import android.Manifest
 import android.app.Application
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,6 +12,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -23,6 +25,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.tatertotterson.littlespud.android.AppContainer
@@ -45,6 +50,9 @@ import com.tatertotterson.littlespud.android.model.MusicSnapshot
 import com.tatertotterson.littlespud.android.model.MusicTrack
 import com.tatertotterson.littlespud.android.model.PushRegistration
 import com.tatertotterson.littlespud.android.model.TemperatureUnitPreference
+import com.tatertotterson.littlespud.android.playback.MusicPlaybackService
+import com.tatertotterson.littlespud.android.playback.toMusicTrack
+import com.tatertotterson.littlespud.android.playback.toPlaybackMediaItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -103,6 +111,7 @@ data class LittleSpudUiState(
     val cameraErrors: Map<String, String> = emptyMap(),
     val music: MusicSnapshot = MusicSnapshot(),
     val musicLoading: Boolean = false,
+    val musicTransportLoading: Boolean = false,
     val musicError: String = "",
     val musicQuery: String = "",
     val selectedMusicTargetIds: Set<String> = emptySet(),
@@ -110,6 +119,7 @@ data class LittleSpudUiState(
     val localMusicQueue: List<MusicTrack> = emptyList(),
     val localMusicQueueIndex: Int = -1,
     val localMusicPlaying: Boolean = false,
+    val localMusicPositionSeconds: Double = 0.0,
 ) {
     val isDemo: Boolean get() = session?.isDemo == true
     val canSend: Boolean get() = session != null && (draft.isNotBlank() || pendingAttachments.isNotEmpty()) && !isSending
@@ -147,39 +157,37 @@ class LittleSpudViewModel(
     private var routeProbeJob: Job? = null
     private var homeJob: Job? = null
     private var musicJob: Job? = null
+    private var musicStateSyncJob: Job? = null
     private var pushJob: Job? = null
     private var voiceCaptureJob: Job? = null
     private var voiceSocket: WebSocket? = null
     private var pendingReopenMicJob: Job? = null
     private var audioRecord: AudioRecord? = null
     private val pendingNotificationAcks = mutableSetOf<String>()
-    private val localPlayer = ExoPlayer.Builder(application).build().apply {
-        addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                _state.update { it.copy(localMusicPlaying = isPlaying) }
-            }
+    private var localMusicController: MediaController? = null
+    private var localMusicControllerFuture: ListenableFuture<MediaController>? = null
+    private var pendingLocalPlayback: ((MediaController) -> Unit)? = null
+    private var localMusicProgressJob: Job? = null
+    private val localMusicPlayerListener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // Some devices briefly restore the player's default gain while
+            // advancing. Reapply the shared slider value before the next item
+            // begins so track changes stay at a constant volume.
+            val volume = _state.value.music.player.volumePercent.coerceIn(0, 100)
+            localMusicController?.volume = volume / 100f
+        }
 
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                _state.update { current ->
-                    val index = current.localMusicQueue.indexOfFirst {
-                        it.id == mediaItem?.mediaId
-                    }
-                    current.copy(
-                        localMusicTrack = current.localMusicQueue.getOrNull(index),
-                        localMusicQueueIndex = index,
-                    )
-                }
-            }
+        override fun onEvents(player: Player, events: Player.Events) {
+            syncLocalMusicPlayerState(player)
+        }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED) {
-                    _state.update { it.copy(localMusicPlaying = false) }
-                }
-            }
-        })
+        override fun onPlayerError(error: PlaybackException) {
+            _state.update { it.copy(musicError = friendlyError(error)) }
+        }
     }
 
     init {
+        connectLocalMusicController(application)
         viewModelScope.launch {
             container.notificationUpdates.revision.collect {
                 refreshNotificationsFromStore()
@@ -188,6 +196,91 @@ class LittleSpudViewModel(
         _state.value.session?.let { session ->
             _state.update { it.copy(hubUrl = session.hubUrl, userName = session.userName, deviceName = session.deviceName) }
             resume()
+        }
+    }
+
+    private fun connectLocalMusicController(application: Application) {
+        val token = SessionToken(
+            application,
+            ComponentName(application, MusicPlaybackService::class.java),
+        )
+        val future = MediaController.Builder(application, token)
+            .setApplicationLooper(Looper.getMainLooper())
+            .buildAsync()
+        localMusicControllerFuture = future
+        future.addListener(
+            {
+                runCatching { future.get() }
+                    .onSuccess { controller ->
+                        if (localMusicControllerFuture !== future) {
+                            controller.release()
+                            return@onSuccess
+                        }
+                        localMusicController = controller
+                        controller.addListener(localMusicPlayerListener)
+                        val pending = pendingLocalPlayback
+                        pendingLocalPlayback = null
+                        if (pending != null) {
+                            pending(controller)
+                        } else {
+                            syncLocalMusicPlayerState(controller)
+                        }
+                    }
+                    .onFailure { error ->
+                        if (localMusicControllerFuture === future) {
+                            _state.update {
+                                it.copy(
+                                    musicError = "Phone playback is unavailable: ${friendlyError(error)}",
+                                )
+                            }
+                        }
+                    }
+            },
+            ContextCompat.getMainExecutor(application),
+        )
+    }
+
+    private fun syncLocalMusicPlayerState(player: Player) {
+        if (_state.value.session?.isDemo == true) return
+        val queue = buildList {
+            repeat(player.mediaItemCount) { index ->
+                player.getMediaItemAt(index).toMusicTrack()?.let(::add)
+            }
+        }
+        val queueIndex = player.currentMediaItemIndex.takeIf { it in queue.indices } ?: -1
+        val position = player.currentPosition.coerceAtLeast(0L) / 1_000.0
+        _state.update { current ->
+            current.copy(
+                localMusicTrack = queue.getOrNull(queueIndex),
+                localMusicQueue = queue,
+                localMusicQueueIndex = queueIndex,
+                localMusicPlaying = player.isPlaying,
+                localMusicPositionSeconds = position,
+                music = current.music.copy(
+                    player = current.music.player.copy(
+                        volumePercent = (player.volume * 100).toInt().coerceIn(0, 100),
+                    ),
+                ),
+            )
+        }
+        updateLocalMusicProgressTracking()
+    }
+
+    private fun updateLocalMusicProgressTracking() {
+        localMusicProgressJob?.cancel()
+        localMusicProgressJob = null
+        val controller = localMusicController ?: return
+        if (!controller.isPlaying) return
+        localMusicProgressJob = viewModelScope.launch {
+            while (isActive && controller.isPlaying) {
+                _state.update {
+                    it.copy(
+                        localMusicPositionSeconds = controller.currentPosition
+                            .coerceAtLeast(0L) / 1_000.0,
+                    )
+                }
+                delay(500)
+            }
         }
     }
 
@@ -460,6 +553,10 @@ class LittleSpudViewModel(
         refreshFromHub(showStatus = false)
         startNotificationPoll()
         startRouteProbe()
+        if (_state.value.activeLane == LittleSpudLane.MUSIC) {
+            refreshMusic()
+            startMusicStateSync()
+        }
         syncPushRegistration()
     }
 
@@ -469,15 +566,20 @@ class LittleSpudViewModel(
         notificationPollJob = null
         routeProbeJob?.cancel()
         routeProbeJob = null
+        stopMusicStateSync()
         if (_state.value.isVoiceRecording || _state.value.isVoiceSubmitting) cancelVoiceInput()
     }
 
     fun selectLane(lane: LittleSpudLane) {
         _state.update { it.copy(activeLane = lane, showSettings = false) }
+        if (lane != LittleSpudLane.MUSIC) stopMusicStateSync()
         when (lane) {
             LittleSpudLane.NOTIFICATIONS -> markNotificationsRead()
             LittleSpudLane.HOME -> refreshHome()
-            LittleSpudLane.MUSIC -> refreshMusic()
+            LittleSpudLane.MUSIC -> {
+                refreshMusic()
+                startMusicStateSync()
+            }
             LittleSpudLane.CHAT -> Unit
         }
     }
@@ -720,7 +822,17 @@ class LittleSpudViewModel(
         musicJob = viewModelScope.launch {
             try {
                 val music = container.api.fetchMusic(session, search, force, limit)
-                _state.update { current -> current.copy(music = music, musicLoading = false, selectedMusicTargetIds = chooseMusicTargets(current.selectedMusicTargetIds, music)) }
+                _state.update { current ->
+                    val reconciled = reconcileMusicSnapshot(current, music)
+                    current.copy(
+                        music = reconciled,
+                        musicLoading = false,
+                        selectedMusicTargetIds = chooseMusicTargets(
+                            current.selectedMusicTargetIds,
+                            reconciled,
+                        ),
+                    )
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -741,9 +853,87 @@ class LittleSpudViewModel(
         refreshMusic(query = "")
     }
 
-    fun toggleMusicTarget(id: String) = _state.update { current ->
-        val updated = if (id in current.selectedMusicTargetIds) current.selectedMusicTargetIds - id else current.selectedMusicTargetIds + id
-        current.copy(selectedMusicTargetIds = updated)
+    fun toggleMusicTarget(id: String) {
+        val snapshot = _state.value
+        val target = snapshot.music.targets.firstOrNull { it.id == id } ?: return
+        if (target.isLocal) {
+            _state.update { it.copy(selectedMusicTargetIds = setOf(id)) }
+            return
+        }
+
+        pendingLocalPlayback = null
+        if (snapshot.localMusicTrack != null) {
+            if (snapshot.session?.isDemo != true) {
+                localMusicController?.run {
+                    stop()
+                    clearMediaItems()
+                }
+            }
+            _state.update {
+                it.copy(
+                    localMusicTrack = null,
+                    localMusicQueue = emptyList(),
+                    localMusicQueueIndex = -1,
+                    localMusicPlaying = false,
+                    localMusicPositionSeconds = 0.0,
+                )
+            }
+        }
+
+        val current = _state.value
+        val remoteSelection = current.selectedMusicTargetIds.filterTo(mutableSetOf()) { targetId ->
+            current.music.targets.firstOrNull { it.id == targetId }?.isLocal != true
+        }
+        val updated = when {
+            id !in remoteSelection -> remoteSelection + id
+            remoteSelection.size > 1 -> remoteSelection - id
+            else -> remoteSelection
+        }
+        _state.update { it.copy(selectedMusicTargetIds = updated) }
+        if (current.session?.isDemo != true) runMusicAction("set_targets")
+    }
+
+    fun playMusicQueueTrack(index: Int) {
+        val current = _state.value
+        val session = current.session ?: return
+        val queue = if (current.localMusicTrack != null) current.localMusicQueue else current.music.player.queue
+        if (index !in queue.indices) return
+        val targets = chooseMusicTargets(current.selectedMusicTargetIds, current.music)
+        _state.update { it.copy(selectedMusicTargetIds = targets) }
+        val local = current.music.targets.any { it.id in targets && it.isLocal }
+        if (local) {
+            playLocalMusicQueue(queue, session, index)
+            return
+        }
+
+        val track = queue[index]
+        if (session.isDemo) {
+            _state.update { state ->
+                state.copy(
+                    music = state.music.copy(
+                        player = state.music.player.copy(
+                            status = "playing",
+                            current = track,
+                            targets = targets.toList(),
+                            queueCount = queue.size,
+                            queueIndex = index,
+                            queue = queue,
+                            durationSeconds = track.durationSeconds,
+                            positionSeconds = 0.0,
+                        ),
+                    ),
+                    musicError = "",
+                )
+            }
+            haptic()
+            return
+        }
+
+        // Music Core starts play_queue at its first entry. Rotate the existing
+        // queue so the selected song starts immediately and the rest continue
+        // in the same circular order.
+        val selectedQueue = queue.drop(index) + queue.take(index)
+        runMusicAction("play_queue", trackIds = selectedQueue.map { it.id })
     }
 
     fun playMusic(track: MusicTrack) {
@@ -793,16 +983,23 @@ class LittleSpudViewModel(
         runMusicAction("play_queue", trackIds = queue.map { it.id })
     }
 
-    private fun playLocalMusicQueue(tracks: List<MusicTrack>, session: LittleSpudSession) {
+    private fun playLocalMusicQueue(
+        tracks: List<MusicTrack>,
+        session: LittleSpudSession,
+        startIndex: Int = 0,
+    ) {
         val queue = tracks.distinctBy { it.id }.filter { it.id.isNotBlank() }
-        val first = queue.firstOrNull() ?: return
+        if (queue.isEmpty()) return
+        val selectedIndex = startIndex.coerceIn(0, queue.lastIndex)
+        val first = queue[selectedIndex]
         if (session.isDemo) {
             _state.update {
                 it.copy(
                     localMusicTrack = first,
                     localMusicQueue = queue,
-                    localMusicQueueIndex = 0,
+                    localMusicQueueIndex = selectedIndex,
                     localMusicPlaying = true,
+                    localMusicPositionSeconds = 0.0,
                     musicError = "",
                 )
             }
@@ -811,22 +1008,42 @@ class LittleSpudViewModel(
         }
         runCatching {
             val items = queue.map { track ->
-                MediaItem.Builder()
-                    .setMediaId(track.id)
-                    .setUri(container.api.musicStreamUrl(session, track))
-                    .build()
+                track.toPlaybackMediaItem(
+                    streamUrl = container.api.musicStreamUrl(session, track),
+                    hubUrl = session.hubUrl,
+                )
             }
-            localPlayer.setMediaItems(items, 0, 0L)
             _state.update {
                 it.copy(
                     localMusicTrack = first,
                     localMusicQueue = queue,
-                    localMusicQueueIndex = 0,
+                    localMusicQueueIndex = selectedIndex,
+                    localMusicPlaying = true,
+                    localMusicPositionSeconds = 0.0,
                     musicError = "",
                 )
             }
-            localPlayer.prepare()
-            localPlayer.play()
+            val startPlayback: (MediaController) -> Unit = { controller ->
+                runCatching {
+                    controller.setMediaItems(items, selectedIndex, 0L)
+                    controller.volume = _state.value.music.player.volumePercent / 100f
+                    controller.prepare()
+                    controller.play()
+                }.onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            localMusicPlaying = false,
+                            musicError = friendlyError(error),
+                        )
+                    }
+                }
+            }
+            val controller = localMusicController
+            if (controller == null) {
+                pendingLocalPlayback = startPlayback
+            } else {
+                startPlayback(controller)
+            }
             haptic()
         }.onFailure { error ->
             _state.update { it.copy(musicError = friendlyError(error)) }
@@ -842,17 +1059,66 @@ class LittleSpudViewModel(
 
     fun toggleMusicPlayback() {
         if (_state.value.localMusicTrack != null) {
-            if (localPlayer.isPlaying) localPlayer.pause() else localPlayer.play()
-            if (_state.value.session?.isDemo == true) _state.update { it.copy(localMusicPlaying = !it.localMusicPlaying) }
+            if (_state.value.session?.isDemo == true) {
+                _state.update { it.copy(localMusicPlaying = !it.localMusicPlaying) }
+            } else {
+                localMusicController?.let { controller ->
+                    if (controller.isPlaying) controller.pause() else controller.play()
+                }
+            }
             return
         }
         runMusicAction(if (_state.value.music.player.status == "playing") "pause" else "resume")
     }
 
+    fun seekMusic(positionSeconds: Double) {
+        val current = _state.value
+        val track = current.localMusicTrack ?: current.music.player.current ?: return
+        val duration = if (current.localMusicTrack != null) {
+            track.durationSeconds
+        } else {
+            max(track.durationSeconds, current.music.player.durationSeconds)
+        }.coerceAtLeast(0.0)
+        if (duration <= 0.0) return
+        val position = positionSeconds.coerceIn(0.0, duration)
+
+        if (current.localMusicTrack != null) {
+            _state.update { it.copy(localMusicPositionSeconds = position) }
+            if (current.session?.isDemo != true) {
+                // Media3 preserves playWhenReady when seeking, so a paused
+                // player stays paused and a playing player continues at release.
+                localMusicController?.seekTo((position * 1_000.0).toLong())
+            }
+            return
+        }
+
+        if (current.session?.isDemo == true) {
+            _state.update { state ->
+                state.copy(
+                    music = state.music.copy(
+                        player = state.music.player.copy(positionSeconds = position),
+                    ),
+                )
+            }
+            return
+        }
+        if (current.musicLoading) return
+        _state.update { state ->
+            state.copy(
+                music = state.music.copy(
+                    player = state.music.player.copy(positionSeconds = position),
+                ),
+            )
+        }
+        runMusicAction("seek", positionSeconds = position)
+    }
+
     fun setMusicVolume(value: Int) {
         val volume = value.coerceIn(0, 100)
         if (_state.value.localMusicTrack != null) {
-            localPlayer.volume = volume / 100f
+            if (_state.value.session?.isDemo != true) {
+                localMusicController?.volume = volume / 100f
+            }
             _state.update { current ->
                 current.copy(
                     music = current.music.copy(
@@ -872,18 +1138,34 @@ class LittleSpudViewModel(
             }
             return
         }
+        // Update the shared snapshot before the request completes. This keeps
+        // a fast next/play tap from resending the previous volume to Tater.
+        _state.update { current ->
+            current.copy(
+                music = current.music.copy(
+                    player = current.music.player.copy(volumePercent = volume),
+                ),
+            )
+        }
         runMusicAction("set_volume", volumePercent = volume)
     }
 
     fun stopMusic() {
         if (_state.value.localMusicTrack != null) {
-            localPlayer.stop(); localPlayer.clearMediaItems()
+            pendingLocalPlayback = null
+            if (_state.value.session?.isDemo != true) {
+                localMusicController?.run {
+                    stop()
+                    clearMediaItems()
+                }
+            }
             _state.update {
                 it.copy(
                     localMusicTrack = null,
                     localMusicQueue = emptyList(),
                     localMusicQueueIndex = -1,
                     localMusicPlaying = false,
+                    localMusicPositionSeconds = 0.0,
                 )
             }
         } else runMusicAction("stop")
@@ -901,11 +1183,15 @@ class LittleSpudViewModel(
                         localMusicTrack = queue[next],
                         localMusicQueueIndex = next,
                         localMusicPlaying = true,
+                        localMusicPositionSeconds = 0.0,
                     )
                 }
             } else {
-                localPlayer.seekTo(next, 0L)
-                localPlayer.play()
+                localMusicController?.run {
+                    volume = _state.value.music.player.volumePercent.coerceIn(0, 100) / 100f
+                    seekTo(next, 0L)
+                    play()
+                }
             }
         } else runMusicAction(if (direction >= 0) "next" else "previous")
     }
@@ -916,11 +1202,23 @@ class LittleSpudViewModel(
         trackIds: List<String> = emptyList(),
         recommendationId: String = "",
         volumePercent: Int? = null,
+        positionSeconds: Double? = null,
     ) {
         val session = _state.value.session ?: return
         if (session.isDemo) return
         if (_state.value.musicLoading) return
-        _state.update { it.copy(musicLoading = true, musicError = "") }
+        val isTransportAction = action in setOf(
+            "play", "play_queue", "play_recommendation",
+            "pause", "resume", "replay", "stop", "next", "previous",
+        )
+        _state.update {
+            it.copy(
+                musicLoading = true,
+                musicTransportLoading = isTransportAction,
+                musicError = "",
+            )
+        }
+        if (isTransportAction) haptic()
         viewModelScope.launch {
             try {
                 val music = container.api.controlMusic(
@@ -932,11 +1230,29 @@ class LittleSpudViewModel(
                     targets = _state.value.selectedMusicTargetIds.toList(),
                     provider = _state.value.music.provider?.id.orEmpty(),
                     volumePercent = volumePercent ?: _state.value.music.player.volumePercent,
+                    positionSeconds = positionSeconds,
                 )
-                _state.update { it.copy(music = music, musicLoading = false, selectedMusicTargetIds = chooseMusicTargets(it.selectedMusicTargetIds, music)) }
-                haptic()
+                _state.update { current ->
+                    val reconciled = reconcileMusicSnapshot(current, music)
+                    current.copy(
+                        music = reconciled,
+                        musicLoading = false,
+                        musicTransportLoading = false,
+                        selectedMusicTargetIds = chooseMusicTargets(
+                            current.selectedMusicTargetIds,
+                            reconciled,
+                        ),
+                    )
+                }
+                if (!isTransportAction) haptic()
             } catch (error: Throwable) {
-                _state.update { it.copy(musicLoading = false, musicError = friendlyError(error)) }
+                _state.update {
+                    it.copy(
+                        musicLoading = false,
+                        musicTransportLoading = false,
+                        musicError = friendlyError(error),
+                    )
+                }
             }
         }
     }
@@ -944,11 +1260,80 @@ class LittleSpudViewModel(
     private fun chooseMusicTargets(existing: Set<String>, music: MusicSnapshot): Set<String> {
         val available = music.targets.map { it.id }.toSet()
         val valid = existing.intersect(available)
-        if (valid.isNotEmpty()) return valid
+        val local = valid.filterTo(mutableSetOf()) { id ->
+            music.targets.firstOrNull { it.id == id }?.isLocal == true
+        }
+        if (local.isNotEmpty()) return local
         val server = music.player.targets.filter { it in available }.toSet()
         if (server.isNotEmpty()) return server
-        return music.targets.firstOrNull { it.isLocal }?.id?.let(::setOf)
-            ?: music.targets.firstOrNull()?.id?.let(::setOf).orEmpty()
+        if (valid.isNotEmpty()) return valid
+        return music.targets.firstOrNull { !it.isLocal }?.id?.let(::setOf)
+            ?: music.targets.firstOrNull { it.isLocal }?.id?.let(::setOf).orEmpty()
+    }
+
+    private fun reconcileMusicSnapshot(
+        current: LittleSpudUiState,
+        incoming: MusicSnapshot,
+    ): MusicSnapshot {
+        val localSelected = current.localMusicTrack != null ||
+            current.selectedMusicTargetIds.any { targetId ->
+                incoming.targets.firstOrNull { it.id == targetId }?.isLocal == true
+            }
+        if (!localSelected) return incoming
+
+        // Music Core owns speaker volume, while phone playback owns its local
+        // output volume. Preserve the latter when polling the shared snapshot;
+        // otherwise an idle/default server value could raise the phone between
+        // songs.
+        return incoming.copy(
+            player = incoming.player.copy(
+                volumePercent = current.music.player.volumePercent,
+            ),
+        )
+    }
+
+    private fun startMusicStateSync() {
+        val session = _state.value.session ?: return
+        if (session.isDemo || _state.value.activeLane != LittleSpudLane.MUSIC || musicStateSyncJob != null) return
+        musicStateSyncJob = viewModelScope.launch {
+            while (isActive) {
+                delay(4_000)
+                val current = _state.value
+                if (current.activeLane != LittleSpudLane.MUSIC) return@launch
+                val latestSession = current.session ?: return@launch
+                if (latestSession.isDemo || current.musicLoading) continue
+                runCatching {
+                    container.api.fetchMusic(
+                        session = latestSession,
+                        query = current.musicQuery,
+                        refresh = false,
+                    )
+                }.onSuccess { music ->
+                    if (_state.value.activeLane == LittleSpudLane.MUSIC &&
+                        !_state.value.musicLoading &&
+                        _state.value.session?.token == latestSession.token
+                    ) {
+                        _state.update { latest ->
+                            val reconciled = reconcileMusicSnapshot(latest, music)
+                            latest.copy(
+                                music = reconciled,
+                                selectedMusicTargetIds = chooseMusicTargets(
+                                    latest.selectedMusicTargetIds,
+                                    reconciled,
+                                ),
+                            )
+                        }
+                    }
+                }
+                // Background music-state sync is best-effort. Manual refresh
+                // continues to surface connection errors to the user.
+            }
+        }
+    }
+
+    private fun stopMusicStateSync() {
+        musicStateSyncJob?.cancel()
+        musicStateSyncJob = null
     }
 
     fun setNotificationsEnabled(enabled: Boolean) {
@@ -1019,7 +1404,11 @@ class LittleSpudViewModel(
         val session = _state.value.session
         pauseForegroundWork()
         cleanupVoiceInput(closeSocket = true)
-        localPlayer.stop(); localPlayer.clearMediaItems()
+        pendingLocalPlayback = null
+        localMusicController?.run {
+            stop()
+            clearMediaItems()
+        }
         container.secureStore.clearSession()
         container.secureStore.clearPushRegistration()
         container.messageStore.clear()
@@ -1095,6 +1484,7 @@ class LittleSpudViewModel(
             content = notification.content,
             createdAt = notification.createdAt,
             kind = "notification",
+            attachments = notification.attachments,
             notificationTitle = notification.title,
             notificationBody = notification.message,
             notificationPriority = notification.priority,
@@ -1254,7 +1644,13 @@ class LittleSpudViewModel(
     override fun onCleared() {
         pauseForegroundWork()
         cleanupVoiceInput(closeSocket = true)
-        localPlayer.release()
+        localMusicProgressJob?.cancel()
+        localMusicProgressJob = null
+        pendingLocalPlayback = null
+        localMusicController?.removeListener(localMusicPlayerListener)
+        localMusicController = null
+        localMusicControllerFuture?.let { MediaController.releaseFuture(it) }
+        localMusicControllerFuture = null
         super.onCleared()
     }
 

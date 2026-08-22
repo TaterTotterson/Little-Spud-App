@@ -100,7 +100,11 @@ final class NotificationService: UNNotificationServiceExtension {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { continue }
-                if let notification = parseNotification(data) {
+                if let notification = parseNotification(
+                    data,
+                    baseURL: baseURL,
+                    token: context.token
+                ) {
                     return notification
                 }
             } catch {
@@ -133,7 +137,11 @@ final class NotificationService: UNNotificationServiceExtension {
         return ""
     }
 
-    private func parseNotification(_ data: Data) -> LittleSpudShared.ResolvedNotification? {
+    private func parseNotification(
+        _ data: Data,
+        baseURL: String,
+        token: String
+    ) -> LittleSpudShared.ResolvedNotification? {
         guard
             let object = try? JSONSerialization.jsonObject(with: data),
             let payload = object as? [String: Any],
@@ -143,13 +151,55 @@ final class NotificationService: UNNotificationServiceExtension {
         let title = stringValue(notification, "title")
         let message = stringValue(notification, "message", "content")
         guard !title.isEmpty || !message.isEmpty else { return nil }
+        let attachments: [LittleSpudShared.ResolvedAttachment] = (
+            notification["attachments"] as? [[String: Any]] ?? []
+        ).compactMap { item -> LittleSpudShared.ResolvedAttachment? in
+            let rawURL = stringValue(item, "previewUrl", "preview_url", "url", "uri")
+            let resolvedURL = authenticatedMediaURL(rawURL, baseURL: baseURL, token: token)
+            guard !resolvedURL.isEmpty else { return nil }
+            let kind = stringValue(item, "type").lowercased()
+            let mimetype = stringValue(item, "mimetype", "mime_type")
+            let type = mimetype.ifEmpty(
+                kind == "image" ? "image/remote" :
+                kind == "video" ? "video/remote" :
+                kind == "audio" ? "audio/remote" :
+                "application/octet-stream"
+            )
+            return LittleSpudShared.ResolvedAttachment(
+                id: stringValue(item, "id", "file_id").ifEmpty(UUID().uuidString),
+                name: stringValue(item, "name", "filename").ifEmpty("attachment"),
+                type: type,
+                size: intValue(item["size"]),
+                url: resolvedURL
+            )
+        }
         return LittleSpudShared.ResolvedNotification(
             id: stringValue(notification, "id").ifEmpty(UUID().uuidString),
             title: title,
             message: message,
             createdAt: dateValue(notification).ifNil(Date()),
-            priority: stringValue(notification, "priority").ifEmpty("normal")
+            priority: stringValue(notification, "priority").ifEmpty("normal"),
+            attachments: attachments
         )
+    }
+
+    private func authenticatedMediaURL(_ value: String, baseURL: String, token: String) -> String {
+        let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "" }
+        let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let absolute = raw.hasPrefix("/") ? "\(base)\(raw)" : raw
+        guard
+            var components = URLComponents(string: absolute),
+            let path = components.url?.path,
+            path.hasPrefix("/api/spudlink/") || path.contains("/api/spudlink/")
+        else {
+            return absolute
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name == "token" }
+        queryItems.append(URLQueryItem(name: "token", value: token))
+        components.queryItems = queryItems
+        return components.url?.absoluteString ?? absolute
     }
 
     private func stringValue(_ dict: [String: Any], _ keys: String...) -> String {
@@ -184,6 +234,13 @@ final class NotificationService: UNNotificationServiceExtension {
             }
         }
         return nil
+    }
+
+    private func intValue(_ value: Any?) -> Int {
+        if let number = value as? NSNumber { return max(0, number.intValue) }
+        if let value = value as? Int { return max(0, value) }
+        if let value = value as? String, let parsed = Int(value) { return max(0, parsed) }
+        return 0
     }
 }
 

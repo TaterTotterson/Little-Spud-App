@@ -5,11 +5,13 @@ final class HapticManager {
     static let shared = HapticManager()
 
     private let replyTickGenerator = UIImpactFeedbackGenerator(style: .soft)
+    private let buttonPressGenerator = UIImpactFeedbackGenerator(style: .light)
     private let completeGenerator = UINotificationFeedbackGenerator()
     private var lastTickAt: TimeInterval = 0
 
     private init() {
         replyTickGenerator.prepare()
+        buttonPressGenerator.prepare()
         completeGenerator.prepare()
     }
 
@@ -17,6 +19,8 @@ final class HapticManager {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             switch type {
+            case "buttonPress":
+                self.buttonPress()
             case "replyTick":
                 self.replyTick()
             case "messageComplete":
@@ -25,6 +29,11 @@ final class HapticManager {
                 break
             }
         }
+    }
+
+    private func buttonPress() {
+        buttonPressGenerator.impactOccurred(intensity: 0.7)
+        buttonPressGenerator.prepare()
     }
 
     private func replyTick() {

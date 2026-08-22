@@ -76,7 +76,12 @@ struct SpudLinkToolNotice {
 }
 
 final class SpudLinkAPI {
-    private let clientVersion = "1.0.0"
+    private var clientVersion: String {
+        let value = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value, !value.isEmpty { return value }
+        return "1.3.0"
+    }
     private let installIdAccount = "little-spud-install-id"
     private let pushGatewayRegisterURL = "https://push.taterassistant.com/little-spud/register"
     private let pushGatewaySendURL = "https://push.taterassistant.com/little-spud/send"
@@ -483,7 +488,7 @@ final class SpudLinkAPI {
         guard let notification = dict(payload["notification"]) else {
             return nil
         }
-        return normalizeNotification(notification)
+        return normalizeNotification(notification, session: session)
     }
 
     func acknowledgeNotification(session: LittleSpudSession, eventID: String) async throws {
@@ -1044,8 +1049,21 @@ final class SpudLinkAPI {
         let provider = normalizeMusicProvider(dict(payload["provider"]))
         let providers = (payload["providers"] as? [[String: Any]] ?? [])
             .compactMap(normalizeMusicProvider)
+        var albumArtworkURLs: [String: String] = [:]
+        func normalizeAlbumTrack(_ item: [String: Any]) -> LittleSpudMusicTrack? {
+            guard var track = normalizeMusicTrack(item) else { return nil }
+            guard track.artworkCacheKey.hasPrefix("album:"), !track.artworkURL.isEmpty else {
+                return track
+            }
+            if let sharedURL = albumArtworkURLs[track.artworkCacheKey] {
+                track.artworkURL = sharedURL
+            } else {
+                albumArtworkURLs[track.artworkCacheKey] = track.artworkURL
+            }
+            return track
+        }
         let tracks = (payload["tracks"] as? [[String: Any]] ?? [])
-            .compactMap(normalizeMusicTrack)
+            .compactMap(normalizeAlbumTrack)
         let trackFeed = dict(payload["track_feed"]) ?? [:]
         let artists = stringList(payload["artists"])
         let albums = stringList(payload["albums"])
@@ -1055,7 +1073,7 @@ final class SpudLinkAPI {
                 let id = dictString(item, "id")
                 guard !id.isEmpty else { return nil }
                 let recommendationTracks = (item["tracks"] as? [[String: Any]] ?? [])
-                    .compactMap(normalizeMusicTrack)
+                    .compactMap(normalizeAlbumTrack)
                 return LittleSpudMusicRecommendation(
                     id: id,
                     name: dictString(item, "name", "title").ifEmpty("Tater Mix"),
@@ -1084,14 +1102,14 @@ final class SpudLinkAPI {
         let player = LittleSpudMusicPlayerState(
             status: dictString(playerPayload, "status").ifEmpty("idle"),
             provider: dictString(playerPayload, "provider"),
-            current: normalizeMusicTrack(dict(playerPayload["current"])),
+            current: dict(playerPayload["current"]).flatMap(normalizeAlbumTrack),
             targets: (playerPayload["targets"] as? [Any] ?? [])
                 .map { String(describing: $0) }
                 .filter { !$0.isEmpty },
             queueCount: intValue(playerPayload["queue_count"]),
             queueIndex: intValue(playerPayload["queue_index"]),
             queue: (playerPayload["queue"] as? [[String: Any]] ?? [])
-                .compactMap(normalizeMusicTrack),
+                .compactMap(normalizeAlbumTrack),
             shuffle: dictBool(playerPayload, "shuffle") ?? false,
             repeatMode: dictString(playerPayload, "repeat").ifEmpty("off"),
             continuousRadio: dictBool(playerPayload, "continuous_radio") ?? false,
@@ -1225,16 +1243,18 @@ final class SpudLinkAPI {
         )
     }
 
-    private func normalizeNotification(_ item: [String: Any]) -> HubNotification? {
+    private func normalizeNotification(_ item: [String: Any], session: LittleSpudSession) -> HubNotification? {
         let title = dictString(item, "title")
         let message = dictString(item, "message", "content")
         guard !title.isEmpty || !message.isEmpty else { return nil }
+        let rawAttachments = (item["attachments"] as? [[String: Any]]) ?? []
         return HubNotification(
             id: dictString(item, "id").ifEmpty(UUID().uuidString),
             title: title,
             message: message,
             createdAt: dateValue(item, keys: ["createdAt", "created_at", "ts"]).ifNil(Date()),
-            priority: dictString(item, "priority").ifEmpty(dictString(dict(item["meta"]), "priority").ifEmpty("normal"))
+            priority: dictString(item, "priority").ifEmpty(dictString(dict(item["meta"]), "priority").ifEmpty("normal")),
+            attachments: normalizeAssistantArtifacts(rawAttachments, session: session)
         )
     }
 

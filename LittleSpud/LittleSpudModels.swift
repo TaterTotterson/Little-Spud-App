@@ -275,6 +275,43 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
         notificationPriority = try container.decodeIfPresent(String.self, forKey: .notificationPriority)
     }
 
+    var notificationDisplayBody: String {
+        notificationBodyParts.body
+    }
+
+    var notificationFaceIDSummary: String? {
+        let summary = notificationBodyParts.faceID
+        return summary.isEmpty ? nil : summary
+    }
+
+    private var notificationBodyParts: (body: String, faceID: String) {
+        let explicitBody = notificationBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawBody: String
+        if !explicitBody.isEmpty {
+            rawBody = explicitBody
+        } else if let divider = content.range(of: "\n\n") {
+            rawBody = String(content[divider.upperBound...])
+        } else {
+            rawBody = content
+        }
+        var bodyLines: [String] = []
+        var faceSummary = ""
+        for line in rawBody.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.lowercased().hasPrefix("face id:") {
+                faceSummary = String(trimmed.dropFirst("Face ID:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            } else {
+                bodyLines.append(line)
+            }
+        }
+        let body = bodyLines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (body, faceSummary)
+    }
+
     var label: String {
         switch role {
         case .user:
@@ -326,6 +363,7 @@ struct HubNotification {
     var message: String
     var createdAt: Date
     var priority: String
+    var attachments: [LittleSpudAttachment] = []
 
     var content: String {
         if !title.isEmpty && !message.isEmpty {
@@ -424,6 +462,31 @@ struct LittleSpudMusicTrack: Identifiable, Equatable {
         [displayArtist, album]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: " · ")
+    }
+
+    /// A stable identity shared by every song on an album. Tracks without
+    /// album metadata deliberately fall back to their artwork URL or track ID.
+    var artworkCacheKey: String {
+        let cleanAlbum = Self.normalizeArtworkIdentity(album)
+        if !cleanAlbum.isEmpty {
+            let cleanProvider = Self.normalizeArtworkIdentity(provider)
+            let cleanArtist = Self.normalizeArtworkIdentity(
+                albumArtist.isEmpty ? displayArtist : albumArtist
+            )
+            return "album:\(cleanProvider):\(cleanArtist):\(cleanAlbum)"
+        }
+        let cleanArtwork = artworkURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanArtwork.isEmpty {
+            return "artwork:\(cleanArtwork)"
+        }
+        return "track:\(Self.normalizeArtworkIdentity(provider)):\(id)"
+    }
+
+    private static func normalizeArtworkIdentity(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 }
 

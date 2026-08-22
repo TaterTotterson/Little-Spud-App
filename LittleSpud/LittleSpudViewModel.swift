@@ -1,7 +1,118 @@
 import AVFoundation
+import CryptoKit
 import Foundation
+import MediaPlayer
 import SwiftUI
 import UIKit
+
+actor LittleSpudMusicArtworkCache {
+    static let shared = LittleSpudMusicArtworkCache()
+
+    private let memory = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private let directory: URL
+
+    private init() {
+        memory.countLimit = 320
+        memory.totalCostLimit = 48 * 1024 * 1024
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        directory = base.appendingPathComponent("LittleSpudAlbumArtwork-v1", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+    }
+
+    func image(for url: URL, cacheKey rawCacheKey: String) async -> UIImage? {
+        let cacheKey = rawCacheKey.isEmpty ? url.absoluteString : rawCacheKey
+        if let cached = memory.object(forKey: cacheKey as NSString) {
+            return cached
+        }
+        if let task = inFlight[cacheKey] {
+            return await task.value
+        }
+
+        let fileURL = directory.appendingPathComponent(Self.fileName(for: cacheKey))
+        let task = Task.detached(priority: .utility) {
+            await Self.loadImage(from: url, fileURL: fileURL, directory: fileURL.deletingLastPathComponent())
+        }
+        inFlight[cacheKey] = task
+        let image = await task.value
+        inFlight.removeValue(forKey: cacheKey)
+        if let image {
+            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+            memory.setObject(image, forKey: cacheKey as NSString, cost: cost)
+        }
+        return image
+    }
+
+    private static func loadImage(
+        from url: URL,
+        fileURL: URL,
+        directory: URL
+    ) async -> UIImage? {
+        let fileManager = FileManager.default
+        if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+           let modified = values.contentModificationDate,
+           Date().timeIntervalSince(modified) < 30 * 24 * 60 * 60,
+           let data = try? Data(contentsOf: fileURL),
+           let image = UIImage(data: data) {
+            return image
+        }
+        try? fileManager.removeItem(at: fileURL)
+
+        do {
+            var request = URLRequest(
+                url: url,
+                cachePolicy: .returnCacheDataElseLoad,
+                timeoutInterval: 30
+            )
+            request.setValue("image/*", forHTTPHeaderField: "Accept")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse,
+               !(200...299).contains(http.statusCode) {
+                return nil
+            }
+            guard !data.isEmpty,
+                  data.count <= 20 * 1024 * 1024,
+                  let image = UIImage(data: data) else {
+                return nil
+            }
+            try? data.write(to: fileURL, options: .atomic)
+            pruneDiskCache(in: directory)
+            return image
+        } catch {
+            return nil
+        }
+    }
+
+    private static func fileName(for cacheKey: String) -> String {
+        SHA256.hash(data: Data(cacheKey.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func pruneDiskCache(in directory: URL) {
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let rows = files.compactMap { url -> (URL, Date, Int)? in
+            guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+            return (url, values.contentModificationDate ?? .distantPast, values.fileSize ?? 0)
+        }.sorted { $0.1 < $1.1 }
+        var totalBytes = rows.reduce(0) { $0 + $1.2 }
+        var totalFiles = rows.count
+        for row in rows where totalBytes > 128 * 1024 * 1024 || totalFiles > 500 {
+            try? FileManager.default.removeItem(at: row.0)
+            totalBytes -= row.2
+            totalFiles -= 1
+        }
+    }
+}
 
 @MainActor
 final class LittleSpudViewModel: ObservableObject {
@@ -38,6 +149,7 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var homeCameraErrors: [String: String] = [:]
     @Published var musicSnapshot: LittleSpudMusicSnapshot = .empty
     @Published var musicLoading = false
+    @Published private(set) var musicTransportLoading = false
     @Published var musicError = ""
     @Published var musicQuery = ""
     @Published var selectedMusicTargetIDs: Set<String> = []
@@ -53,12 +165,16 @@ final class LittleSpudViewModel: ObservableObject {
     @Published private(set) var temperatureRoomLocationOverrides: [String: LittleSpudTemperatureRoomLocation] = [:]
     @Published var activeLane: LittleSpudLane = .chat {
         didSet {
+            if activeLane != .music {
+                stopMusicStateSync()
+            }
             if activeLane == .notifications {
                 markNotificationsRead()
             } else if activeLane == .home {
                 refreshHome()
             } else if activeLane == .music {
                 refreshMusic()
+                startMusicStateSync()
             }
         }
     }
@@ -127,13 +243,21 @@ final class LittleSpudViewModel: ObservableObject {
 
     var musicQueue: [LittleSpudMusicTrack] {
         if usesLocalMusicPlayback {
-            return localMusicQueue.isEmpty ? musicSnapshot.tracks : localMusicQueue
+            if !localMusicQueue.isEmpty {
+                return localMusicQueue
+            }
+            return musicSnapshot.player.queue.isEmpty
+                ? musicSnapshot.tracks
+                : musicSnapshot.player.queue
         }
         return musicSnapshot.player.queue
     }
 
     var musicQueueIndex: Int {
-        usesLocalMusicPlayback ? localMusicQueueIndex : musicSnapshot.player.queueIndex
+        if usesLocalMusicPlayback, !localMusicQueue.isEmpty {
+            return localMusicQueueIndex
+        }
+        return musicSnapshot.player.queueIndex
     }
 
     var musicContinuousRadio: Bool {
@@ -220,15 +344,19 @@ final class LittleSpudViewModel: ObservableObject {
     private var lastStreamHapticByMessageId: [String: Date] = [:]
     private var homeTask: Task<Void, Never>?
     private var musicTask: Task<Void, Never>?
+    private var musicStateSyncTask: Task<Void, Never>?
     private var musicProgressTask: Task<Void, Never>?
     private var localMusicContinuationTask: Task<Void, Never>?
     private var localMusicQueueSessionID = ""
     private var localMusicPlayer: AVPlayer?
     private var localMusicFinishedObserver: NSObjectProtocol?
+    private var nowPlayingCommandsConfigured = false
+    private var nowPlayingArtworkTask: Task<Void, Never>?
 
     func start() {
         guard !didStart else { return }
         didStart = true
+        configureNowPlayingCommands()
         notificationsEnabled = UserDefaults.standard.bool(forKey: notificationsKey)
         ttsEnabled = UserDefaults.standard.bool(forKey: ttsKey)
         temperatureUnitPreference = LittleSpudTemperatureUnitPreference(
@@ -281,6 +409,10 @@ final class LittleSpudViewModel: ObservableObject {
         importSharedResolvedNotifications()
         startNotificationPoll()
         startRouteProbe()
+        if activeLane == .music {
+            refreshMusic()
+            startMusicStateSync()
+        }
         syncRemotePushRegistrationIfPossible()
         Task { [weak self] in
             await self?.refreshFromHub(showStatus: false)
@@ -290,6 +422,7 @@ final class LittleSpudViewModel: ObservableObject {
     func pauseForegroundWork() {
         routeProbeTask?.cancel()
         routeProbeTask = nil
+        stopMusicStateSync()
         demoVoiceTask?.cancel()
         demoVoiceTask = nil
         cancelVoiceInput()
@@ -906,12 +1039,7 @@ final class LittleSpudViewModel: ObservableObject {
                     limit: limit
                 )
                 guard !Task.isCancelled else { return }
-                musicSnapshot = snapshot
-                if musicVolumePercent == 75 {
-                    musicVolumePercent = snapshot.player.volumePercent
-                }
-                ensureMusicTargetSelection()
-                syncMusicProgress()
+                applyRemoteMusicSnapshot(snapshot)
                 musicError = snapshot.provider?.connected == false
                     ? "Connect \(snapshot.provider?.label ?? "the active provider") in Music Core."
                     : ""
@@ -954,6 +1082,9 @@ final class LittleSpudViewModel: ObservableObject {
         } else {
             selectedMusicTargetIDs.insert(targetID)
         }
+        if session?.isDemo != true {
+            runRemoteMusicAction("set_targets")
+        }
     }
 
     func setMusicVolume(_ value: Double) {
@@ -963,8 +1094,10 @@ final class LittleSpudViewModel: ObservableObject {
 
     func commitMusicVolume() {
         guard !usesLocalMusicPlayback else { return }
+        // Keep every subsequent transport command on the newly selected volume,
+        // even if the set-volume request and a fast follow-up tap overlap.
+        musicSnapshot.player.volumePercent = musicVolumePercent
         if session?.isDemo == true {
-            musicSnapshot.player.volumePercent = musicVolumePercent
             return
         }
         runRemoteMusicAction("set_volume")
@@ -1086,6 +1219,48 @@ final class LittleSpudViewModel: ObservableObject {
         refreshMusic(query: "")
     }
 
+    func playMusicQueueTrack(at index: Int) {
+        guard let currentSession = session else { return }
+        let queue = musicQueue
+        guard queue.indices.contains(index) else { return }
+        ensureMusicTargetSelection()
+        guard !selectedMusicTargets.isEmpty else {
+            musicError = "Choose where the music should play."
+            return
+        }
+
+        let track = queue[index]
+        if usesLocalMusicPlayback {
+            if localMusicQueue.map(\.id) != queue.map(\.id) {
+                startLocalMusicQueue(queue, at: index)
+            } else {
+                localMusicQueueIndex = index
+            }
+            playMusicLocally(track, session: currentSession)
+            return
+        }
+
+        if currentSession.isDemo {
+            musicSnapshot.player.current = track
+            musicSnapshot.player.status = "playing"
+            musicSnapshot.player.queue = queue
+            musicSnapshot.player.queueCount = queue.count
+            musicSnapshot.player.queueIndex = index
+            musicSnapshot.player.durationSeconds = track.durationSeconds
+            musicSnapshot.player.positionSeconds = 0
+            syncMusicProgress()
+            musicError = ""
+            HapticManager.shared.play("messageComplete")
+            return
+        }
+
+        // Music Core starts play_queue at its first entry. Rotate the existing
+        // queue so the selected song starts immediately while preserving its
+        // circular play order.
+        let selectedQueue = Array(queue[index...]) + Array(queue[..<index])
+        runRemoteMusicAction("play_queue", trackIDs: selectedQueue.map(\.id))
+    }
+
     func toggleMusicPlayback() {
         if usesLocalMusicPlayback {
             guard let player = localMusicPlayer else {
@@ -1102,6 +1277,7 @@ final class LittleSpudViewModel: ObservableObject {
                 localMusicStatus = "playing"
             }
             syncMusicProgress()
+            updateNowPlayingPlaybackState()
             return
         }
         let status = musicPlaybackStatus.lowercased()
@@ -1113,10 +1289,11 @@ final class LittleSpudViewModel: ObservableObject {
         switch status {
         case "playing":
             runRemoteMusicAction("pause")
-        case "paused":
-            runRemoteMusicAction("resume")
         default:
-            runRemoteMusicAction("replay")
+            // Resume is also used for a stopped player with a staged timeline
+            // position. Music Core decides whether that means resume-from-seek
+            // or a normal start from the beginning.
+            runRemoteMusicAction("resume")
         }
     }
 
@@ -1158,6 +1335,7 @@ final class LittleSpudViewModel: ObservableObject {
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             )
+            updateNowPlayingPlaybackState(elapsedTime: position)
             return
         }
         if session?.isDemo == true {
@@ -1177,11 +1355,24 @@ final class LittleSpudViewModel: ObservableObject {
     ) {
         guard let currentSession = session, !currentSession.isDemo else { return }
         guard !musicLoading else { return }
+        let isTransportAction = [
+            "play", "play_queue", "play_recommendation",
+            "pause", "resume", "replay", "stop", "next", "previous"
+        ].contains(action)
         musicLoading = true
+        musicTransportLoading = isTransportAction
         musicError = ""
+        if isTransportAction {
+            HapticManager.shared.play("buttonPress")
+        }
         Task { [weak self] in
             guard let self else { return }
-            defer { self.musicLoading = false }
+            defer {
+                self.musicLoading = false
+                if isTransportAction {
+                    self.musicTransportLoading = false
+                }
+            }
             do {
                 let snapshot = try await api.controlMusic(
                     session: currentSession,
@@ -1194,10 +1385,10 @@ final class LittleSpudViewModel: ObservableObject {
                     volumePercent: musicVolumePercent,
                     positionSeconds: positionSeconds
                 )
-                musicSnapshot = snapshot
-                ensureMusicTargetSelection()
-                syncMusicProgress()
-                HapticManager.shared.play("messageComplete")
+                applyRemoteMusicSnapshot(snapshot)
+                if !isTransportAction {
+                    HapticManager.shared.play("messageComplete")
+                }
             } catch {
                 musicError = error.localizedDescription
             }
@@ -1223,10 +1414,10 @@ final class LittleSpudViewModel: ObservableObject {
                 session: currentSession,
                 track: track
             )
+            stopLocalMusic(clearTrack: false)
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playback, mode: .default)
             try audioSession.setActive(true)
-            stopLocalMusic(clearTrack: false)
             let item = AVPlayerItem(url: streamURL)
             let player = AVPlayer(playerItem: item)
             player.volume = Float(musicVolumePercent) / 100
@@ -1247,6 +1438,7 @@ final class LittleSpudViewModel: ObservableObject {
             }
             player.play()
             syncMusicProgress()
+            publishNowPlayingInfo(for: track)
             reportLocalMusicStarted(track, session: currentSession)
             scheduleLocalMusicContinuationIfNeeded(session: currentSession)
             musicError = ""
@@ -1254,6 +1446,7 @@ final class LittleSpudViewModel: ObservableObject {
         } catch {
             localMusicStatus = "error"
             musicError = error.localizedDescription
+            clearNowPlayingInfo()
         }
     }
 
@@ -1268,6 +1461,7 @@ final class LittleSpudViewModel: ObservableObject {
         musicProgressTask?.cancel()
         musicProgressTask = nil
         musicProgressSeconds = 0
+        clearNowPlayingInfo()
         if clearTrack {
             localMusicContinuationTask?.cancel()
             localMusicContinuationTask = nil
@@ -1278,6 +1472,7 @@ final class LittleSpudViewModel: ObservableObject {
             localMusicQueueSessionID = ""
             localMusicRadioName = "Little Spud Continuous Radio"
         }
+        deactivateAudioSessionIfIdle()
     }
 
     private func startLocalMusicQueue(
@@ -1373,8 +1568,12 @@ final class LittleSpudViewModel: ObservableObject {
 
     private func ensureMusicTargetSelection() {
         let available = Set(musicSnapshot.targets.map(\.id))
-        selectedMusicTargetIDs = selectedMusicTargetIDs.intersection(available)
-        if !selectedMusicTargetIDs.isEmpty {
+        let validSelection = selectedMusicTargetIDs.intersection(available)
+        let localSelection = validSelection.filter { id in
+            musicSnapshot.targets.first(where: { $0.id == id })?.isLocal == true
+        }
+        if !localSelection.isEmpty {
+            selectedMusicTargetIDs = Set(localSelection)
             return
         }
         let serverTargets = musicSnapshot.player.targets.filter { available.contains($0) }
@@ -1382,11 +1581,76 @@ final class LittleSpudViewModel: ObservableObject {
             selectedMusicTargetIDs = Set(serverTargets)
             return
         }
-        if let local = musicSnapshot.targets.first(where: { $0.isLocal }) {
-            selectedMusicTargetIDs = [local.id]
-        } else if let first = musicSnapshot.targets.first {
-            selectedMusicTargetIDs = [first.id]
+        if !validSelection.isEmpty {
+            selectedMusicTargetIDs = validSelection
+            return
         }
+        if let first = musicSnapshot.targets.first(where: { !$0.isLocal }) {
+            selectedMusicTargetIDs = [first.id]
+        } else if let local = musicSnapshot.targets.first(where: { $0.isLocal }) {
+            selectedMusicTargetIDs = [local.id]
+        }
+    }
+
+    private func startMusicStateSync() {
+        guard activeLane == .music,
+              let currentSession = session,
+              !currentSession.isDemo,
+              musicStateSyncTask == nil else {
+            return
+        }
+        let client = api
+        musicStateSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard self.activeLane == .music else { return }
+                guard !self.musicLoading,
+                      let latestSession = self.session,
+                      !latestSession.isDemo else {
+                    continue
+                }
+                do {
+                    let snapshot = try await client.fetchMusic(
+                        session: latestSession,
+                        query: self.musicQuery,
+                        refresh: false
+                    )
+                    guard !Task.isCancelled,
+                          self.activeLane == .music,
+                          !self.musicLoading,
+                          self.session?.token == latestSession.token else {
+                        continue
+                    }
+                    self.applyRemoteMusicSnapshot(snapshot)
+                } catch {
+                    if Task.isCancelled || self.isExpectedCancellation(error) {
+                        return
+                    }
+                    // Foreground sync is best-effort; the manual refresh button
+                    // remains responsible for surfacing connection errors.
+                }
+            }
+        }
+    }
+
+    private func stopMusicStateSync() {
+        musicStateSyncTask?.cancel()
+        musicStateSyncTask = nil
+    }
+
+    /// Applies Music Core's shared player state consistently. In particular,
+    /// volume is server-authoritative for speaker playback, so opening either
+    /// phone after changing Tater immediately reflects the same value.
+    private func applyRemoteMusicSnapshot(_ snapshot: LittleSpudMusicSnapshot) {
+        musicSnapshot = snapshot
+        ensureMusicTargetSelection()
+        guard !usesLocalMusicPlayback else {
+            syncMusicProgress()
+            return
+        }
+        musicVolumePercent = snapshot.player.volumePercent
+        syncMusicProgress()
     }
 
     private func syncMusicProgress() {
@@ -1420,6 +1684,144 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    private func configureNowPlayingCommands() {
+        guard !nowPlayingCommandsConfigured else { return }
+        nowPlayingCommandsConfigured = true
+        let commands = MPRemoteCommandCenter.shared()
+
+        commands.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.localMusicStatus != "playing" else { return }
+                self.toggleMusicPlayback()
+            }
+            return .success
+        }
+        commands.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.localMusicStatus == "playing" else { return }
+                self.toggleMusicPlayback()
+            }
+            return .success
+        }
+        commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.toggleMusicPlayback()
+            }
+            return .success
+        }
+        commands.nextTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.skipMusic(1)
+            }
+            return .success
+        }
+        commands.previousTrackCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.skipMusic(-1)
+            }
+            return .success
+        }
+        commands.stopCommand.addTarget { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.stopMusic()
+            }
+            return .success
+        }
+        commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            let position = event.positionTime
+            Task { @MainActor [weak self] in
+                self?.seekMusic(to: position)
+            }
+            return .success
+        }
+
+        commands.skipForwardCommand.isEnabled = false
+        commands.skipBackwardCommand.isEnabled = false
+        setNowPlayingCommandsEnabled(false)
+    }
+
+    private func setNowPlayingCommandsEnabled(_ enabled: Bool) {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.playCommand.isEnabled = enabled
+        commands.pauseCommand.isEnabled = enabled
+        commands.togglePlayPauseCommand.isEnabled = enabled
+        commands.stopCommand.isEnabled = enabled
+        commands.nextTrackCommand.isEnabled = enabled && musicQueue.count > 1
+        commands.previousTrackCommand.isEnabled = enabled && musicQueue.count > 1
+        commands.changePlaybackPositionCommand.isEnabled = enabled && musicDurationSeconds > 0
+    }
+
+    private func publishNowPlayingInfo(for track: LittleSpudMusicTrack) {
+        guard localMusicPlayer != nil else { return }
+        let duration = max(0, track.durationSeconds)
+        let elapsed = localMusicPlayer?.currentTime().seconds ?? 0
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: track.title.isEmpty ? "Little Spud" : track.title,
+            MPMediaItemPropertyArtist: track.displayArtist.isEmpty ? musicProviderLabel : track.displayArtist,
+            MPMediaItemPropertyAlbumTitle: track.album,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed.isFinite ? max(0, elapsed) : 0,
+            MPNowPlayingInfoPropertyPlaybackRate: localMusicStatus == "playing" ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+            MPNowPlayingInfoPropertyPlaybackQueueCount: musicQueue.count,
+            MPNowPlayingInfoPropertyPlaybackQueueIndex: max(0, localMusicQueueIndex),
+            MPNowPlayingInfoPropertyExternalContentIdentifier: track.id,
+        ]
+        if let fallbackImage = UIImage(named: "LittleSpudMascot") {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+                boundsSize: fallbackImage.size,
+                requestHandler: { _ in fallbackImage }
+            )
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        setNowPlayingCommandsEnabled(true)
+
+        nowPlayingArtworkTask?.cancel()
+        guard let artworkURL = musicArtworkURL(for: track) else { return }
+        let trackID = track.id
+        nowPlayingArtworkTask = Task { [weak self] in
+            guard let self else { return }
+            let image = await LittleSpudMusicArtworkCache.shared.image(
+                for: artworkURL,
+                cacheKey: musicArtworkCacheKey(for: track)
+            )
+            guard !Task.isCancelled,
+                  let image,
+                  localMusicTrack?.id == trackID
+            else { return }
+            var updated = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? info
+            updated[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+                boundsSize: image.size,
+                requestHandler: { _ in image }
+            )
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = updated
+        }
+    }
+
+    private func updateNowPlayingPlaybackState(elapsedTime: Double? = nil) {
+        guard localMusicPlayer != nil,
+              var info = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        else { return }
+        let current = elapsedTime ?? localMusicPlayer?.currentTime().seconds ?? musicProgressSeconds
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = current.isFinite ? max(0, current) : 0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = localMusicStatus == "playing" ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackQueueCount] = musicQueue.count
+        info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = max(0, localMusicQueueIndex)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        setNowPlayingCommandsEnabled(true)
+    }
+
+    private func clearNowPlayingInfo() {
+        nowPlayingArtworkTask?.cancel()
+        nowPlayingArtworkTask = nil
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        setNowPlayingCommandsEnabled(false)
+    }
+
     func musicArtworkURL(for track: LittleSpudMusicTrack?) -> URL? {
         guard let track else { return nil }
         return resolveMusicArtworkURL(track.artworkURL)
@@ -1430,6 +1832,19 @@ final class LittleSpudViewModel: ObservableObject {
             ? recommendation.tracks.first?.artworkURL ?? ""
             : recommendation.artworkURL
         return resolveMusicArtworkURL(artwork)
+    }
+
+    func musicArtworkCacheKey(for track: LittleSpudMusicTrack?) -> String {
+        guard let track else { return "music-artwork:empty" }
+        return "music-artwork:v1:\(session?.hubUrl ?? "demo"):\(track.artworkCacheKey)"
+    }
+
+    func musicArtworkCacheKey(for recommendation: LittleSpudMusicRecommendation) -> String {
+        let customArtwork = recommendation.artworkURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identity = customArtwork.isEmpty
+            ? recommendation.tracks.first?.artworkCacheKey ?? "recommendation:\(recommendation.id)"
+            : "recommendation:\(recommendation.id):\(customArtwork)"
+        return "music-artwork:v1:\(session?.hubUrl ?? "demo"):\(identity)"
     }
 
     private func resolveMusicArtworkURL(_ rawValue: String) -> URL? {
@@ -1977,6 +2392,7 @@ final class LittleSpudViewModel: ObservableObject {
         homeCameraErrors = [:]
         musicSnapshot = .empty
         musicLoading = false
+        musicTransportLoading = false
         musicError = ""
         musicQuery = ""
         selectedMusicTargetIDs = []
@@ -2394,6 +2810,7 @@ final class LittleSpudViewModel: ObservableObject {
             content: notification.content.isEmpty ? "Notification" : notification.content,
             createdAt: notification.createdAt,
             kind: "notification",
+            attachments: notification.attachments,
             notificationTitle: notification.title,
             notificationBody: notification.message,
             notificationPriority: notification.priority
@@ -2996,7 +3413,16 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     private func deactivateAudioSessionIfIdle() {
-        guard audioPlayer == nil, audioEngine == nil, !speechSynthesizer.isSpeaking else { return }
+        if localMusicPlayer != nil {
+            let audioSession = AVAudioSession.sharedInstance()
+            try? audioSession.setCategory(.playback, mode: .default)
+            try? audioSession.setActive(true)
+            return
+        }
+        guard audioPlayer == nil,
+              audioEngine == nil,
+              !speechSynthesizer.isSpeaking
+        else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
@@ -3112,7 +3538,17 @@ final class LittleSpudViewModel: ObservableObject {
                 title: item.title,
                 message: item.message,
                 createdAt: item.createdAt,
-                priority: item.priority
+                priority: item.priority,
+                attachments: (item.attachments ?? []).map { attachment in
+                    LittleSpudAttachment(
+                        id: attachment.id,
+                        name: attachment.name,
+                        type: attachment.type,
+                        size: attachment.size,
+                        previewUrl: attachment.url,
+                        dataUrl: ""
+                    )
+                }
             )
             appendNotificationMessage(LittleSpudMessage(
                 id: notification.id,
@@ -3120,6 +3556,7 @@ final class LittleSpudViewModel: ObservableObject {
                 content: notification.content.isEmpty ? "Notification" : notification.content,
                 createdAt: notification.createdAt,
                 kind: "notification",
+                attachments: notification.attachments,
                 notificationTitle: notification.title,
                 notificationBody: notification.message,
                 notificationPriority: notification.priority

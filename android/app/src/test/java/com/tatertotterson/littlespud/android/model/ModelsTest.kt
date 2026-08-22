@@ -77,6 +77,20 @@ class ModelsTest {
     }
 
     @Test
+    fun awarenessFaceIdSummaryIsSeparatedFromTheNotificationBody() {
+        val notification = LittleSpudMessage(
+            role = LittleSpudRole.ASSISTANT,
+            content = "Back Yard Camera\n\nA person walked through the yard.\n\nFace ID: Fred recognized.",
+            kind = "notification",
+            notificationTitle = "Back Yard Camera",
+            notificationBody = "A person walked through the yard.\n\nFace ID: Fred recognized.",
+        )
+
+        assertEquals("A person walked through the yard.", notification.notificationDisplayBody)
+        assertEquals("Fred recognized", notification.notificationFaceIdSummary)
+    }
+
+    @Test
     fun dateParserHandlesSecondsMillisecondsAndIso8601() {
         assertEquals(1_700_000_000_000, JSONObject().put("ts", 1_700_000_000).dateMillis("ts"))
         assertEquals(1_700_000_000_000, JSONObject().put("ts", 1_700_000_000_000).dateMillis("ts"))
@@ -105,4 +119,46 @@ class ModelsTest {
             TemperatureUnitPreference.fromStorage("unsupported"),
         )
     }
+
+    @Test
+    fun artworkCacheKeyIsSharedBySongsOnTheSameAlbum() {
+        val first = musicTrack(
+            id = "track-one",
+            title = "One",
+            artworkUrl = "/artwork/track-one",
+        )
+        val second = musicTrack(
+            id = "track-two",
+            title = "Two",
+            artworkUrl = "/artwork/track-two",
+        )
+
+        assertEquals(first.artworkCacheKey, second.artworkCacheKey)
+    }
+
+    @Test
+    fun artworkCacheKeyFallsBackPerTrackWithoutAlbumMetadata() {
+        val first = musicTrack(id = "track-one", title = "One", album = "", artworkUrl = "")
+        val second = musicTrack(id = "track-two", title = "Two", album = "", artworkUrl = "")
+
+        assertFalse(first.artworkCacheKey == second.artworkCacheKey)
+    }
+
+    private fun musicTrack(
+        id: String,
+        title: String,
+        album: String = "Shared Album",
+        artworkUrl: String,
+    ) = MusicTrack(
+        id = id,
+        title = title,
+        artist = "Track Artist",
+        albumArtist = "Album Artist",
+        album = album,
+        genre = "",
+        durationSeconds = 180.0,
+        durationDisplay = "3:00",
+        provider = "tater_tube",
+        artworkUrl = artworkUrl,
+    )
 }

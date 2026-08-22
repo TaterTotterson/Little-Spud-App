@@ -25,6 +25,7 @@ enum LittleSpudShared {
         var message: String
         var createdAt: Date
         var priority: String
+        var attachments: [ResolvedAttachment]?
 
         var content: String {
             if !title.isEmpty && !message.isEmpty {
@@ -32,6 +33,14 @@ enum LittleSpudShared {
             }
             return title.isEmpty ? message : title
         }
+    }
+
+    struct ResolvedAttachment: Codable, Equatable {
+        var id: String
+        var name: String
+        var type: String
+        var size: Int
+        var url: String
     }
 
     static func saveNotificationContext(_ context: NotificationContext) {

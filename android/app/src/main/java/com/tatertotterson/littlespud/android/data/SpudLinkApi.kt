@@ -3,6 +3,7 @@ package com.tatertotterson.littlespud.android.data
 import android.net.Uri
 import android.os.Build
 import android.util.Base64
+import com.tatertotterson.littlespud.android.BuildConfig
 import com.tatertotterson.littlespud.android.model.CameraPreview
 import com.tatertotterson.littlespud.android.model.ConnectionRoute
 import com.tatertotterson.littlespud.android.model.HomeCategory
@@ -322,7 +323,7 @@ class SpudLinkApi(
             "Notification poll",
             wait + 10L,
         )
-        return payload.objectOrNull("notification")?.let(::normalizeNotification)
+        return payload.objectOrNull("notification")?.let { normalizeNotification(it, session) }
     }
 
     suspend fun acknowledgeNotification(session: LittleSpudSession, eventId: String) {
@@ -699,13 +700,22 @@ class SpudLinkApi(
     private fun normalizeMusicSnapshot(payload: JSONObject): MusicSnapshot {
         val provider = normalizeMusicProvider(payload.objectOrNull("provider"))
         val providers = payload.objectArray("providers").mapNotNull(::normalizeMusicProvider)
-        val tracks = payload.objectArray("tracks").mapNotNull(::normalizeMusicTrack)
+        val albumArtworkUrls = mutableMapOf<String, String>()
+        fun normalizeAlbumTrack(item: JSONObject): MusicTrack? {
+            val track = normalizeMusicTrack(item) ?: return null
+            if (!track.artworkCacheKey.startsWith("album:") || track.artworkUrl.isBlank()) {
+                return track
+            }
+            val sharedUrl = albumArtworkUrls.putIfAbsent(track.artworkCacheKey, track.artworkUrl)
+            return if (sharedUrl == null) track else track.copy(artworkUrl = sharedUrl)
+        }
+        val tracks = payload.objectArray("tracks").mapNotNull(::normalizeAlbumTrack)
         val feed = payload.objectOrNull("track_feed") ?: JSONObject()
         val recommendations = payload.objectArray("recommendations").mapNotNull { item ->
             val id = item.string("id"); if (id.isBlank()) return@mapNotNull null
             MusicRecommendation(
                 id, item.string("name", "title").ifBlank { "Tater Mix" }, item.string("description", "subtitle"),
-                item.objectArray("tracks").mapNotNull(::normalizeMusicTrack), item.string("artwork_url"),
+                item.objectArray("tracks").mapNotNull(::normalizeAlbumTrack), item.string("artwork_url"),
             )
         }
         val targets = payload.objectArray("targets").mapNotNull { item ->
@@ -730,11 +740,11 @@ class SpudLinkApi(
         val player = MusicPlayerState(
             status = playerJson.string("status").ifBlank { "idle" },
             provider = playerJson.string("provider"),
-            current = normalizeMusicTrack(playerJson.objectOrNull("current")),
+            current = playerJson.objectOrNull("current")?.let(::normalizeAlbumTrack),
             targets = playerJson.stringArray("targets"),
             queueCount = playerJson.intValue("queue_count"),
             queueIndex = playerJson.intValue("queue_index", -1),
-            queue = playerJson.objectArray("queue").mapNotNull(::normalizeMusicTrack),
+            queue = playerJson.objectArray("queue").mapNotNull(::normalizeAlbumTrack),
             shuffle = playerJson.booleanOrNull("shuffle") ?: false,
             repeatMode = playerJson.string("repeat").ifBlank { "off" },
             continuousRadio = playerJson.booleanOrNull("continuous_radio") ?: false,
@@ -795,13 +805,15 @@ class SpudLinkApi(
         )
     }
 
-    private fun normalizeNotification(item: JSONObject): HubNotification? {
+    private fun normalizeNotification(item: JSONObject, session: LittleSpudSession): HubNotification? {
         val title = item.string("title"); val message = item.string("message", "content")
         if (title.isBlank() && message.isBlank()) return null
+        val attachments = normalizeAssistantArtifacts(item.optJSONArray("attachments")?.objects().orEmpty(), session)
         return HubNotification(
             item.string("id").ifBlank { UUID.randomUUID().toString() }, title, message,
             item.dateMillis("createdAt", "created_at", "ts") ?: System.currentTimeMillis(),
             item.string("priority").ifBlank { item.objectOrNull("meta")?.string("priority").orEmpty() }.ifBlank { "normal" },
+            attachments,
         )
     }
 
@@ -965,7 +977,7 @@ class SpudLinkApi(
     }
 
     private companion object {
-        const val CLIENT_VERSION = "1.0.0"
+        val CLIENT_VERSION: String = BuildConfig.VERSION_NAME
         const val CLIENT_ID = "little-spud-android"
         const val APPLICATION_ID = "com.tatertotterson.littlespud.android"
         const val PUSH_GATEWAY_REGISTER_URL = "https://push.taterassistant.com/little-spud/register"

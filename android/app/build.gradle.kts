@@ -26,8 +26,8 @@ android {
         applicationId = "com.tatertotterson.littlespud.android"
         minSdk = 26
         targetSdk = 37
-        versionCode = System.getenv("LITTLE_SPUD_VERSION_CODE")?.toIntOrNull()?.takeIf { it > 0 } ?: 1
-        versionName = System.getenv("LITTLE_SPUD_VERSION_NAME")?.trim()?.ifBlank { null } ?: "1.0.0"
+        versionCode = System.getenv("LITTLE_SPUD_VERSION_CODE")?.toIntOrNull()?.takeIf { it > 0 } ?: 2
+        versionName = System.getenv("LITTLE_SPUD_VERSION_NAME")?.trim()?.ifBlank { null } ?: "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

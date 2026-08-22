@@ -78,7 +78,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -103,12 +102,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import com.tatertotterson.littlespud.android.model.HomeCategory
 import com.tatertotterson.littlespud.android.model.HomeRoom
 import com.tatertotterson.littlespud.android.model.MusicRecommendation
@@ -163,7 +164,7 @@ fun HomeScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
             EmptyFeature("No rooms available", "Pair with a Tater that has Home controls configured.")
         }
         if (overviewStats.isNotEmpty()) item {
-            HomeOverviewStrip(overviewStats, onSelect = { selectedOverview = it })
+            HomeOverviewCard(overviewStats, onSelect = { selectedOverview = it })
         }
         items(state.home.rooms, key = { it.id }) { room ->
             val displaySummary = homeRoomDisplaySummary(room, state.temperatureUnitPreference)
@@ -248,39 +249,143 @@ private data class HomeOverviewStat(
 )
 
 @Composable
-private fun HomeOverviewStrip(stats: List<HomeOverviewStat>, onSelect: (HomeOverviewStat) -> Unit) {
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        items(stats, key = { it.id }) { stat ->
-            Card(
-                onClick = { onSelect(stat) },
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                colors = CardDefaults.cardColors(containerColor = SpudPanelRaised),
-            ) {
-                Row(
-                    Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+private fun HomeOverviewCard(stats: List<HomeOverviewStat>, onSelect: (HomeOverviewStat) -> Unit) {
+    val prioritizedStats = stats.withIndex()
+        .sortedWith(compareBy({ homeOverviewPriority(it.value) }, { it.index }))
+        .map { it.value }
+    val hasSafetyAlert = stats.any { it.id in setOf("leak", "doors", "locks") }
+    val hasMotion = stats.any { it.id == "motion" }
+    val statusTitle = when {
+        hasSafetyAlert -> "Attention"
+        hasMotion -> "Activity"
+        else -> "Live"
+    }
+    val statusColor = when {
+        hasSafetyAlert -> SpudDanger
+        hasMotion -> SpudOrange
+        else -> SpudGreen
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, SpudOrange.copy(alpha = 0.2f)),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.linearGradient(listOf(SpudPanelRaised, SpudPanel)),
+                    RoundedCornerShape(18.dp),
+                )
+                .padding(13.dp),
+            verticalArrangement = Arrangement.spacedBy(11.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(
+                    Modifier
+                        .size(34.dp)
+                        .background(SpudOrange.copy(alpha = 0.14f), RoundedCornerShape(10.dp)),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(
-                        Modifier
-                            .size(28.dp)
-                            .background(stat.color.copy(alpha = 0.13f), CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(stat.icon, null, tint = stat.color, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Home, null, tint = SpudOrange, modifier = Modifier.size(17.dp))
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text("Home snapshot", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (hasSafetyAlert) "Check the highlighted items" else "Live from your Tater",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpudMuted,
+                    )
+                }
+                Row(
+                    Modifier
+                        .background(statusColor.copy(alpha = 0.11f), CircleShape)
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Box(Modifier.size(6.dp).background(statusColor, CircleShape))
+                    Text(statusTitle, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            prioritizedStats.chunked(2).forEach { rowStats ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowStats.forEach { stat ->
+                        HomeOverviewMetric(
+                            stat = stat,
+                            onSelect = { onSelect(stat) },
+                            modifier = Modifier.weight(1f),
+                        )
                     }
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(stat.value, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                            Icon(Icons.Default.Info, null, tint = SpudMuted, modifier = Modifier.size(11.dp))
-                        }
-                        Text(stat.label, style = MaterialTheme.typography.labelSmall, color = SpudMuted)
-                    }
+                    if (rowStats.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }
     }
+}
+
+@Composable
+private fun HomeOverviewMetric(
+    stat: HomeOverviewStat,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        onClick = onSelect,
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, stat.color.copy(alpha = 0.16f)),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.18f)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 9.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(27.dp)
+                    .background(stat.color.copy(alpha = 0.13f), RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(stat.icon, null, tint = stat.color, modifier = Modifier.size(14.dp))
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                Text(
+                    stat.value,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    stat.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = SpudMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(Icons.Default.Info, null, tint = SpudMuted, modifier = Modifier.size(11.dp))
+        }
+    }
+}
+
+private fun homeOverviewPriority(stat: HomeOverviewStat): Int = when {
+    stat.id == "leak" -> 0
+    stat.id == "doors" -> 1
+    stat.id == "locks" -> 2
+    stat.id == "motion" -> 3
+    stat.id == "lights" -> 4
+    stat.id == "fans" -> 5
+    stat.id.startsWith("temperature") -> 6
+    stat.id == "humidity" -> 7
+    else -> 8
 }
 
 @Composable
@@ -1142,16 +1247,36 @@ private fun MusicExpandablePlayer(
     modifier: Modifier = Modifier,
 ) {
     val isPlaying = if (state.localMusicTrack != null) state.localMusicPlaying else state.music.player.status == "playing"
+    val transportLoading = state.musicTransportLoading
     val queue = if (state.localMusicTrack != null) state.localMusicQueue else state.music.player.queue
     val queueIndex = if (state.localMusicTrack != null) state.localMusicQueueIndex else state.music.player.queueIndex
     val targetSummary = state.music.targets
         .filter { it.id in state.selectedMusicTargetIds }
         .joinToString { it.label }
         .ifBlank { "Choose player" }
-    val duration = (track?.durationSeconds ?: 0.0).coerceAtLeast(state.music.player.durationSeconds).coerceAtLeast(0.0)
-    val position = if (state.localMusicTrack != null) 0.0 else state.music.player.positionSeconds.coerceIn(0.0, duration.coerceAtLeast(0.0))
+    val duration = if (state.localMusicTrack != null) {
+        track?.durationSeconds?.coerceAtLeast(0.0) ?: 0.0
+    } else {
+        (track?.durationSeconds ?: 0.0)
+            .coerceAtLeast(state.music.player.durationSeconds)
+            .coerceAtLeast(0.0)
+    }
+    val position = if (state.localMusicTrack != null) {
+        state.localMusicPositionSeconds.coerceIn(0.0, duration.coerceAtLeast(0.0))
+    } else {
+        state.music.player.positionSeconds.coerceIn(0.0, duration.coerceAtLeast(0.0))
+    }
     var volume by remember(state.music.player.volumePercent) {
         mutableFloatStateOf(state.music.player.volumePercent.toFloat())
+    }
+    var timelineDragging by remember(track?.id) { mutableStateOf(false) }
+    var timelinePosition by remember(track?.id) {
+        mutableFloatStateOf(position.toFloat())
+    }
+    val displayedPosition = if (timelineDragging) {
+        timelinePosition.toDouble()
+    } else {
+        position
     }
 
     Card(
@@ -1243,39 +1368,56 @@ private fun MusicExpandablePlayer(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    IconButton(onClick = { model.skipMusic(-1) }, enabled = track != null, modifier = Modifier.size(38.dp)) {
+                    IconButton(onClick = { model.skipMusic(-1) }, enabled = track != null && !transportLoading, modifier = Modifier.size(38.dp)) {
                         Icon(Icons.Default.SkipPrevious, "Previous", Modifier.size(22.dp))
                     }
                     IconButton(
                         onClick = model::toggleMusicPlayback,
-                        enabled = track != null,
+                        enabled = track != null && !transportLoading,
                         modifier = Modifier.size(44.dp).background(
                             if (track != null) SpudOrange else SpudMuted.copy(alpha = 0.25f),
                             CircleShape,
                         ),
                     ) {
-                        Icon(
-                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            if (isPlaying) "Pause" else "Play",
-                            Modifier.size(27.dp),
-                            tint = MaterialTheme.colorScheme.background,
-                        )
+                        if (transportLoading) {
+                            CircularProgressIndicator(
+                                Modifier.size(21.dp),
+                                color = MaterialTheme.colorScheme.background,
+                                strokeWidth = 2.5.dp,
+                            )
+                        } else {
+                            Icon(
+                                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                if (isPlaying) "Pause" else "Play",
+                                Modifier.size(27.dp),
+                                tint = MaterialTheme.colorScheme.background,
+                            )
+                        }
                     }
-                    IconButton(onClick = { model.skipMusic(1) }, enabled = track != null, modifier = Modifier.size(38.dp)) {
+                    IconButton(onClick = { model.skipMusic(1) }, enabled = track != null && !transportLoading, modifier = Modifier.size(38.dp)) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(22.dp))
                     }
                 }
             }
 
             Column(Modifier.fillMaxWidth().padding(horizontal = if (expanded) 14.dp else 12.dp, vertical = 2.dp)) {
-                LinearProgressIndicator(
-                    progress = { if (duration > 0) (position / duration).toFloat() else 0f },
-                    modifier = Modifier.fillMaxWidth().height(3.dp),
-                    color = SpudOrange,
-                    trackColor = SpudMuted.copy(alpha = 0.22f),
+                Slider(
+                    value = displayedPosition.toFloat(),
+                    onValueChange = { value ->
+                        timelineDragging = true
+                        timelinePosition = value
+                    },
+                    onValueChangeFinished = {
+                        val destination = timelinePosition.toDouble()
+                        timelineDragging = false
+                        model.seekMusic(destination)
+                    },
+                    enabled = duration > 0.0 && track != null && !transportLoading,
+                    valueRange = 0f..maxOf(1f, duration.toFloat()),
+                    modifier = Modifier.fillMaxWidth().height(22.dp),
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatMusicTime(position), color = SpudMuted, style = MaterialTheme.typography.labelSmall)
+                    Text(formatMusicTime(displayedPosition), color = SpudMuted, style = MaterialTheme.typography.labelSmall)
                     Text(formatMusicTime(duration), color = SpudMuted, style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -1286,24 +1428,32 @@ private fun MusicExpandablePlayer(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = { model.skipMusic(-1) }, enabled = track != null) { Icon(Icons.Default.SkipPrevious, "Previous") }
+                    IconButton(onClick = { model.skipMusic(-1) }, enabled = track != null && !transportLoading) { Icon(Icons.Default.SkipPrevious, "Previous") }
                     IconButton(
                         onClick = model::toggleMusicPlayback,
-                        enabled = track != null,
+                        enabled = track != null && !transportLoading,
                         modifier = Modifier.size(48.dp).background(
                             if (track != null) SpudOrange else SpudMuted.copy(alpha = 0.25f),
                             CircleShape,
                         ),
                     ) {
-                        Icon(
-                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            if (isPlaying) "Pause" else "Play",
-                            Modifier.size(30.dp),
-                            tint = MaterialTheme.colorScheme.background,
-                        )
+                        if (transportLoading) {
+                            CircularProgressIndicator(
+                                Modifier.size(23.dp),
+                                color = MaterialTheme.colorScheme.background,
+                                strokeWidth = 2.5.dp,
+                            )
+                        } else {
+                            Icon(
+                                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                if (isPlaying) "Pause" else "Play",
+                                Modifier.size(30.dp),
+                                tint = MaterialTheme.colorScheme.background,
+                            )
+                        }
                     }
-                    IconButton(onClick = model::stopMusic, enabled = track != null) { Icon(Icons.Default.Stop, "Stop") }
-                    IconButton(onClick = { model.skipMusic(1) }, enabled = track != null) { Icon(Icons.Default.SkipNext, "Next") }
+                    IconButton(onClick = model::stopMusic, enabled = track != null && !transportLoading) { Icon(Icons.Default.Stop, "Stop") }
+                    IconButton(onClick = { model.skipMusic(1) }, enabled = track != null && !transportLoading) { Icon(Icons.Default.SkipNext, "Next") }
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 1.dp),
@@ -1353,6 +1503,9 @@ private fun MusicExpandablePlayer(
                                         if (current) SpudOrange.copy(alpha = 0.13f) else SpudPanel,
                                         RoundedCornerShape(13.dp),
                                     )
+                                    .clickable(enabled = !state.musicLoading) {
+                                        model.playMusicQueueTrack(index)
+                                    }
                                     .padding(horizontal = 10.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
@@ -1515,10 +1668,24 @@ private fun TrackRow(track: MusicTrack, state: LittleSpudUiState, model: LittleS
 
 @Composable
 private fun Artwork(track: MusicTrack, state: LittleSpudUiState, size: Int) {
-    val url = remember(track.artworkUrl, state.session?.hubUrl) { resolveArtworkUrl(state.session?.hubUrl.orEmpty(), track.artworkUrl) }
+    val context = LocalContext.current
+    val hubUrl = state.session?.hubUrl.orEmpty()
+    val url = remember(track.artworkUrl, hubUrl) {
+        resolveArtworkUrl(hubUrl, track.artworkUrl)
+    }
+    val albumCacheKey = remember(track.artworkCacheKey, hubUrl) {
+        "music-artwork:v1:$hubUrl:${track.artworkCacheKey}"
+    }
     if (url.isNotBlank()) {
+        val request = remember(url, albumCacheKey, size) {
+            ImageRequest.Builder(context)
+                .data(url)
+                .memoryCacheKey("$albumCacheKey:$size")
+                .diskCacheKey(albumCacheKey)
+                .build()
+        }
         AsyncImage(
-            model = url,
+            model = request,
             contentDescription = track.title,
             modifier = Modifier.size(size.dp).clip(RoundedCornerShape((size / 5).dp)),
             contentScale = ContentScale.Crop,
