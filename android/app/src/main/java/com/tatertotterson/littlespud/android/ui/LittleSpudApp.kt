@@ -625,7 +625,6 @@ private fun NotificationAttachmentPreview(attachments: List<LittleSpudAttachment
         when {
             attachment.previewUrl.isNotBlank() && attachment.type.startsWith("video/") -> NotificationVideoPreview(
                 url = attachment.previewUrl,
-                title = attachment.displayName,
                 suppliedSnapshot = dataBitmap,
             )
             dataBitmap != null -> Image(
@@ -639,6 +638,11 @@ private fun NotificationAttachmentPreview(attachments: List<LittleSpudAttachment
                 contentDescription = attachment.displayName,
                 modifier = Modifier.fillMaxWidth().height(138.dp).clip(RoundedCornerShape(12.dp)),
                 contentScale = ContentScale.Crop,
+            )
+            attachment.type.startsWith("video/") -> Text(
+                "Video clip unavailable",
+                color = SpudMuted,
+                style = MaterialTheme.typography.labelSmall,
             )
             else -> AttachmentView(attachment)
         }
@@ -656,7 +660,6 @@ private fun NotificationAttachmentPreview(attachments: List<LittleSpudAttachment
 @Composable
 private fun NotificationVideoPreview(
     url: String,
-    title: String,
     suppliedSnapshot: androidx.compose.ui.graphics.ImageBitmap?,
 ) {
     var fullScreen by rememberSaveable(url) { mutableStateOf(false) }
@@ -693,28 +696,24 @@ private fun NotificationVideoPreview(
         if (snapshot != null) {
             Image(
                 bitmap = snapshot,
-                contentDescription = title.ifBlank { "Video clip snapshot" },
+                contentDescription = "Video clip snapshot",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
             )
         }
-        Row(
+        Box(
             Modifier
-                .align(Alignment.BottomStart)
-                .padding(9.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .align(Alignment.Center)
+                .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.72f))
-                .padding(horizontal = 9.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(10.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Default.PlayCircle, null, Modifier.size(18.dp), tint = SpudOrange)
-            Text(
-                title.ifBlank { "Play video clip" },
-                color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            Icon(
+                Icons.Default.PlayCircle,
+                contentDescription = "Play video clip",
+                modifier = Modifier.size(30.dp),
+                tint = SpudOrange,
             )
         }
     }
@@ -722,7 +721,6 @@ private fun NotificationVideoPreview(
     if (fullScreen) {
         FullScreenNotificationVideo(
             url = url,
-            title = title,
             onDismiss = { fullScreen = false },
         )
     }
@@ -731,7 +729,6 @@ private fun NotificationVideoPreview(
 @Composable
 private fun FullScreenNotificationVideo(
     url: String,
-    title: String,
     onDismiss: () -> Unit,
 ) {
     var videoView by remember(url) { mutableStateOf<VideoView?>(null) }
@@ -774,23 +771,6 @@ private fun FullScreenNotificationVideo(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-
-            if (title.isNotBlank()) {
-                Text(
-                    title,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .padding(start = 18.dp, top = 14.dp, end = 70.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.Black.copy(alpha = 0.65f))
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
-                )
-            }
 
             IconButton(
                 onClick = onDismiss,

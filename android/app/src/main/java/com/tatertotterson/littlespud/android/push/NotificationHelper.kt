@@ -25,8 +25,14 @@ class NotificationHelper(private val context: Context) {
         ).apply {
             description = context.getString(R.string.notification_channel_description)
             enableVibration(true)
+            setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
+
+        manager.getNotificationChannel(LEGACY_CHANNEL_ID)?.let { legacyChannel ->
+            legacyChannel.setShowBadge(false)
+            manager.createNotificationChannel(legacyChannel)
+        }
     }
 
     fun show(notification: HubNotification) {
@@ -54,6 +60,8 @@ class NotificationHelper(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(notification.message.ifBlank { notification.content }))
             .setPriority(if (urgent) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
             .setCategory(if (urgent) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_MESSAGE)
+            .setNumber(0)
+            .setBadgeIconType(NotificationCompat.BADGE_ICON_NONE)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
@@ -61,7 +69,8 @@ class NotificationHelper(private val context: Context) {
     }
 
     companion object {
-        const val CHANNEL_ID = "little-spud-alerts"
+        const val CHANNEL_ID = "little-spud-alerts-no-badge"
+        private const val LEGACY_CHANNEL_ID = "little-spud-alerts"
         const val EXTRA_OPEN_NOTIFICATIONS = "little_spud_open_notifications"
     }
 }

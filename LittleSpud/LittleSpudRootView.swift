@@ -2628,7 +2628,7 @@ private struct MusicPlayerView: View {
     @State private var playerExpanded = false
     @State private var showsPlayers = false
 
-    private let collapsedPlayerHeight: CGFloat = 168
+    private let collapsedPlayerHeight: CGFloat = 140
 
     var body: some View {
         GeometryReader { proxy in
@@ -3120,8 +3120,6 @@ private struct MusicPersistentPlayer: View {
                 .accessibilityLabel("Show current playlist")
             }
 
-            MusicProgressSlider(compact: true)
-
             HStack(spacing: 10) {
                 Button(action: openPlayers) {
                     Label(model.musicTargetSummary, systemImage: "hifispeaker.2.fill")
@@ -3167,63 +3165,6 @@ private struct MusicPersistentPlayer: View {
                 if value.translation.height < -24 { openQueue() }
             }
         )
-    }
-}
-
-private struct MusicProgressSlider: View {
-    @EnvironmentObject private var model: LittleSpudViewModel
-    var compact = false
-    var showsTimes = false
-    @State private var dragPosition: Double = 0
-    @State private var isDragging = false
-
-    private var duration: Double {
-        max(0, model.musicDurationSeconds)
-    }
-
-    private var position: Double {
-        isDragging ? dragPosition : min(duration, model.musicProgressSeconds)
-    }
-
-    var body: some View {
-        VStack(spacing: compact ? 2 : 5) {
-            Slider(
-                value: Binding(
-                    get: { position },
-                    set: { dragPosition = $0 }
-                ),
-                in: 0...max(1, duration),
-                onEditingChanged: { editing in
-                    if editing {
-                        isDragging = true
-                        dragPosition = model.musicProgressSeconds
-                    } else {
-                        let destination = dragPosition
-                        isDragging = false
-                        model.seekMusic(to: destination)
-                    }
-                }
-            )
-            .tint(AppTheme.accent2)
-            .disabled(duration <= 0 || model.musicCurrentTrack == nil)
-
-            if !compact || showsTimes {
-                HStack {
-                    Text(musicTime(position))
-                    Spacer()
-                    Text(musicTime(duration))
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(AppTheme.muted)
-            }
-        }
-        .frame(height: compact ? (showsTimes ? 28 : 18) : nil)
-    }
-
-    private func musicTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds.rounded(.down))
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -3354,9 +3295,6 @@ private struct MusicExpandablePlayer: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 2)
             }
-
-            MusicProgressSlider(compact: !isExpanded, showsTimes: !isExpanded)
-                .padding(.horizontal, isExpanded ? 14 : 12)
 
             if isExpanded {
                 HStack(spacing: 22) {
@@ -4743,7 +4681,14 @@ private struct MediaAttachmentCard: View {
             if mediaKind == .image {
                 imageBody
             } else if mediaKind == .video, let remoteURL {
-                InlineVideoPlayerView(url: remoteURL, height: compact ? 132 : 190)
+                if compact {
+                    NotificationVideoPreviewView(
+                        url: remoteURL,
+                        suppliedSnapshot: imageFromDataURL
+                    )
+                } else {
+                    InlineVideoPlayerView(url: remoteURL, height: 190)
+                }
             } else if mediaKind == .audio, let remoteURL {
                 InlineAudioPlayerView(
                     url: remoteURL,
@@ -4753,7 +4698,7 @@ private struct MediaAttachmentCard: View {
             } else {
                 fileBody
             }
-            if mediaKind != .audio {
+            if mediaKind != .audio && !compact {
                 Text(attachment.displayName)
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
@@ -4858,6 +4803,114 @@ private struct MediaAttachmentCard: View {
         let kb = Double(attachment.size) / 1024
         if kb < 1024 { return String(format: "%.1f KB", kb) }
         return String(format: "%.1f MB", kb / 1024)
+    }
+}
+
+private struct NotificationVideoPreviewView: View {
+    let url: URL
+    let suppliedSnapshot: UIImage?
+
+    @State private var extractedSnapshot: UIImage?
+    @State private var showsFullScreenVideo = false
+
+    private var snapshot: UIImage? {
+        suppliedSnapshot ?? extractedSnapshot
+    }
+
+    var body: some View {
+        Button {
+            showsFullScreenVideo = true
+        } label: {
+            ZStack {
+                Color.black
+
+                if let snapshot {
+                    Image(uiImage: snapshot)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ProgressView()
+                        .tint(.white)
+                }
+
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(AppTheme.accent2)
+                    .shadow(color: .black.opacity(0.65), radius: 5)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 132)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Play video clip")
+        .task(id: url) {
+            await loadSnapshotIfNeeded()
+        }
+        .fullScreenCover(isPresented: $showsFullScreenVideo) {
+            FullScreenNotificationVideoView(url: url)
+        }
+    }
+
+    private func loadSnapshotIfNeeded() async {
+        guard suppliedSnapshot == nil else { return }
+        let image = await Task.detached(priority: .utility) {
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 1280, height: 1280)
+            guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+                return nil as UIImage?
+            }
+            return UIImage(cgImage: cgImage)
+        }.value
+        guard !Task.isCancelled else { return }
+        extractedSnapshot = image
+    }
+}
+
+private struct FullScreenNotificationVideoView: View {
+    let url: URL
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+
+            if let player {
+                VideoPlayer(player: player)
+                    .ignoresSafeArea()
+            } else {
+                ProgressView()
+                    .tint(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.black.opacity(0.65), in: Circle())
+            }
+            .padding(.top, 12)
+            .padding(.trailing, 12)
+            .accessibilityLabel("Close video")
+        }
+        .onAppear {
+            let player = AVPlayer(url: url)
+            self.player = player
+            player.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
     }
 }
 

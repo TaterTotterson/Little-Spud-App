@@ -53,6 +53,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate {
         return true
     }
 
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        LocalNotificationManager.shared.clearBadge()
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         guard FirebaseApp.app() != nil else { return }
         Messaging.messaging().apnsToken = deviceToken

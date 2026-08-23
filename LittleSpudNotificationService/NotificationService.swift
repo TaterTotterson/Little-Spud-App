@@ -17,6 +17,7 @@ final class NotificationService: UNNotificationServiceExtension {
             finish(with: request.content)
             return
         }
+        content.badge = nil
         bestAttemptContent = content
 
         resolveTask = Task { [weak self] in

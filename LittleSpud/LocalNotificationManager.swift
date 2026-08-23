@@ -20,6 +20,7 @@ final class LocalNotificationManager: NSObject, UNUserNotificationCenterDelegate
 
     func configure() {
         center.delegate = self
+        clearBadge()
     }
 
     func deliver(_ payload: NativeNotificationPayload) {
@@ -29,7 +30,7 @@ final class LocalNotificationManager: NSObject, UNUserNotificationCenterDelegate
             case .authorized, .provisional, .ephemeral:
                 self.addNotification(payload)
             case .notDetermined:
-                self.center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                self.center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
                     if granted {
                         self.addNotification(payload)
                     }
@@ -53,7 +54,7 @@ final class LocalNotificationManager: NSObject, UNUserNotificationCenterDelegate
                 case .authorized, .provisional, .ephemeral:
                     continuation.resume(returning: true)
                 case .notDetermined:
-                    self.center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                    self.center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
                         continuation.resume(returning: granted)
                     }
                 case .denied:
@@ -78,6 +79,14 @@ final class LocalNotificationManager: NSObject, UNUserNotificationCenterDelegate
         let identifier = payload.tag.isEmpty ? "little-spud-\(UUID().uuidString)" : payload.tag
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         center.add(request)
+    }
+
+    func clearBadge() {
+        center.setBadgeCount(0) { error in
+            if let error {
+                print("Little Spud could not clear the app icon badge: \(error.localizedDescription)")
+            }
+        }
     }
 
     func userNotificationCenter(

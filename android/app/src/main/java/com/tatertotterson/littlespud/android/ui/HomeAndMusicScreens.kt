@@ -1040,7 +1040,7 @@ fun MusicScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
         }
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val collapsedPlayerHeight = 168.dp
+        val collapsedPlayerHeight = 140.dp
         val playerHeight by animateDpAsState(
             targetValue = if (playerExpanded) maxHeight else minOf(collapsedPlayerHeight, maxHeight),
             label = "music-player-height",
@@ -1254,29 +1254,8 @@ private fun MusicExpandablePlayer(
         .filter { it.id in state.selectedMusicTargetIds }
         .joinToString { it.label }
         .ifBlank { "Choose player" }
-    val duration = if (state.localMusicTrack != null) {
-        track?.durationSeconds?.coerceAtLeast(0.0) ?: 0.0
-    } else {
-        (track?.durationSeconds ?: 0.0)
-            .coerceAtLeast(state.music.player.durationSeconds)
-            .coerceAtLeast(0.0)
-    }
-    val position = if (state.localMusicTrack != null) {
-        state.localMusicPositionSeconds.coerceIn(0.0, duration.coerceAtLeast(0.0))
-    } else {
-        state.music.player.positionSeconds.coerceIn(0.0, duration.coerceAtLeast(0.0))
-    }
     var volume by remember(state.music.player.volumePercent) {
         mutableFloatStateOf(state.music.player.volumePercent.toFloat())
-    }
-    var timelineDragging by remember(track?.id) { mutableStateOf(false) }
-    var timelinePosition by remember(track?.id) {
-        mutableFloatStateOf(position.toFloat())
-    }
-    val displayedPosition = if (timelineDragging) {
-        timelinePosition.toDouble()
-    } else {
-        position
     }
 
     Card(
@@ -1397,28 +1376,6 @@ private fun MusicExpandablePlayer(
                     IconButton(onClick = { model.skipMusic(1) }, enabled = track != null && !transportLoading, modifier = Modifier.size(38.dp)) {
                         Icon(Icons.Default.SkipNext, "Next", Modifier.size(22.dp))
                     }
-                }
-            }
-
-            Column(Modifier.fillMaxWidth().padding(horizontal = if (expanded) 14.dp else 12.dp, vertical = 2.dp)) {
-                Slider(
-                    value = displayedPosition.toFloat(),
-                    onValueChange = { value ->
-                        timelineDragging = true
-                        timelinePosition = value
-                    },
-                    onValueChangeFinished = {
-                        val destination = timelinePosition.toDouble()
-                        timelineDragging = false
-                        model.seekMusic(destination)
-                    },
-                    enabled = duration > 0.0 && track != null && !transportLoading,
-                    valueRange = 0f..maxOf(1f, duration.toFloat()),
-                    modifier = Modifier.fillMaxWidth().height(22.dp),
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatMusicTime(displayedPosition), color = SpudMuted, style = MaterialTheme.typography.labelSmall)
-                    Text(formatMusicTime(duration), color = SpudMuted, style = MaterialTheme.typography.labelSmall)
                 }
             }
 
@@ -1627,11 +1584,6 @@ private fun PlayerArtwork(track: MusicTrack?, state: LittleSpudUiState, size: In
             }
         }
     }
-}
-
-private fun formatMusicTime(seconds: Double): String {
-    val total = seconds.coerceAtLeast(0.0).toInt()
-    return "%d:%02d".format(total / 60, total % 60)
 }
 
 @Composable
