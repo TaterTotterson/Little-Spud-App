@@ -1,17 +1,44 @@
 <div align="center">
   <a href="https://taterassistant.com">
-    <img src="assets/littlespud.png" alt="Tater Little Spud App" width="720"/>
+    <img src="assets/littlespud.png" alt="Little Spud for iOS and Android" width="720"/>
   </a>
 </div>
-<h3 align="center">
-  <a href="https://taterassistant.com">taterassistant.com</a>
-</h3>
+<p align="center">
+  <a href="https://taterassistant.com">
+    <img alt="Visit Tater Assistant" src="https://img.shields.io/badge/Tater%20Assistant-Visit%20Website-F28C28?style=for-the-badge&logo=googlechrome&logoColor=white" />
+  </a>
+  <a href="https://discord.gg/w52namKyXT">
+    <img alt="Join the Tater Assistant Discord" src="https://img.shields.io/badge/Discord-Join%20the%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" />
+  </a>
+</p>
 
 # Little Spud
 
-This repository contains the native iOS and Android apps for Little Spud. Both use the same SpudLink API for pairing, chat, voice, home controls, Music Core, and device notifications.
+Little Spud is the native iOS and Android companion app for a user-controlled, self-hosted [Tater](https://taterassistant.com) instance. Both apps use the same SpudLink API for secure pairing, chat, voice, home controls, Music Core, and device notifications.
 
 Device notifications use Firebase Cloud Messaging and Apple Push Notification service to wake the app with a generic Little Spud alert. The real notification content stays in the paired Tater instance and is fetched by the app or notification service extension when possible.
+
+## Get Little Spud
+
+<p align="center">
+  <a href="https://apps.apple.com/app/little-spud/id6781400718">
+    <img alt="Download Little Spud on the App Store" src="https://img.shields.io/badge/App%20Store-Download%20Little%20Spud-0D96F6?style=for-the-badge&logo=apple&logoColor=white" />
+  </a>
+  <a href="https://play.google.com/store/apps/details?id=com.tatertotterson.littlespud.android">
+    <img alt="Download Little Spud on Google Play" src="https://img.shields.io/badge/Google%20Play-Download%20Little%20Spud-34A853?style=for-the-badge&logo=googleplay&logoColor=white" />
+  </a>
+</p>
+
+## Features
+
+- SpudLink pairing by QR code or manual connection details, plus an on-device demo mode.
+- A Tater-styled navigation drawer for notifications, chat, Home controls, and Music Core.
+- Streaming chat, synchronized history, image attachments, text-to-speech, and live microphone input.
+- A dedicated notification inbox with titles, timestamps, snapshots, urgent-alert treatment, and full-screen video playback.
+- Provider-neutral room controls for lights, fans, switches, plugs, covers, garage doors, locks, thermostats, cameras, and sensors.
+- Automatic, Fahrenheit, and Celsius temperature display preferences shared across the Home experience.
+- Music Core browsing, search, playlists, album-art caching, synchronized playback targets and volume, and playback directly on the phone.
+- Background notification wake-ups that fetch private alert content directly from the paired Tater instance.
 
 ## Build
 
@@ -59,18 +86,3 @@ Firebase client configuration and Android signing are optional CI secrets. Witho
 - `IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64` for Firebase in the iOS Simulator artifact
 
 Create the Base64 secrets as single-line values, for example: `base64 < google-services.json | tr -d '\n'`. The iOS asset is intended for Simulator testing; signed iPhone/App Store distribution remains an Apple code-signing workflow.
-
-## iOS Native Features
-
-- SpudLink pairing by QR payload or manual code.
-- Tater chat over `/api/spudlink/v1/tater/chat`.
-- History sync and queued Little Spud notification polling.
-- Device notifications through Firebase/APNs with Tater-side content resolution.
-- A dedicated Tater-styled notification inbox with preserved titles, timestamps, attachments, and stronger treatment for urgent alerts.
-- Live streamed Tater replies with reply ticks and completion haptics.
-- Four-lane navigation: swipe right for notifications, or left through room controls and the Music Core player.
-- Music Core browsing, search, now-playing controls, sat/media-player selection, and playback directly on this device.
-- Provider-neutral room controls for lights, fans, switches, plugs, covers, garage doors, locks, and thermostats, with compact read-only sensor summaries.
-- Persistent automatic/Fahrenheit/Celsius display preferences, user-selectable inside/outside temperature rooms, and simultaneous compact inside and outside averages alongside active lights, fans, doors, locks, leaks, and motion grouped by room.
-- Tappable room rows in the whole-home Lights details turn every light in that room off when any are on, or turn the room on when all are off; a dedicated compact slider adjusts supported room brightness with one update on release.
-- Inside-temperature details place any live thermostat controls above the contributing room sensor readings; outside details remain sensor-only.
