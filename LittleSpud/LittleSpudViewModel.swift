@@ -116,6 +116,8 @@ actor LittleSpudMusicArtworkCache {
 }
 
 private final class SatChatCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private static let minimumFrameInterval = 0.05
+
     private let session = AVCaptureSession()
     private let captureQueue = DispatchQueue(label: "com.tatertotterson.littlespud.satchat.camera")
     private let frameQueue = DispatchQueue(label: "com.tatertotterson.littlespud.satchat.frames")
@@ -166,7 +168,7 @@ private final class SatChatCameraCapture: NSObject, AVCaptureVideoDataOutputSamp
         from connection: AVCaptureConnection
     ) {
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastFrameAt >= 0.4,
+        guard now - lastFrameAt >= Self.minimumFrameInterval,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastFrameAt = now
         let source = CIImage(cvPixelBuffer: pixelBuffer).oriented(.leftMirrored)
@@ -174,6 +176,54 @@ private final class SatChatCameraCapture: NSObject, AVCaptureVideoDataOutputSamp
               let jpeg = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.55),
               jpeg.count <= 2 * 1024 * 1024 else { return }
         onFrame(jpeg)
+    }
+}
+
+/// Keeps video best-effort and current: at most one frame is being written and
+/// one newer frame may wait behind it. Audio continues to use the socket
+/// directly, so a slow link can drop pictures without delaying conversation.
+private final class SatChatVideoFrameSender {
+    private let queue = DispatchQueue(label: "com.tatertotterson.littlespud.satchat.video-send")
+    private weak var socket: URLSessionWebSocketTask?
+    private var pendingFrame: Data?
+    private var isSending = false
+
+    init(socket: URLSessionWebSocketTask) {
+        self.socket = socket
+    }
+
+    func submit(jpeg: Data) {
+        var frame = Data("TSCV1".utf8)
+        frame.append(jpeg)
+        queue.async { [weak self] in
+            guard let self, self.socket != nil else { return }
+            self.pendingFrame = frame
+            self.sendNewestFrameIfIdle()
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            self?.socket = nil
+            self?.pendingFrame = nil
+        }
+    }
+
+    private func sendNewestFrameIfIdle() {
+        guard !isSending, let socket, let frame = pendingFrame else { return }
+        pendingFrame = nil
+        isSending = true
+        socket.send(.data(frame)) { [weak self, weak socket] error in
+            self?.queue.async { [weak self, weak socket] in
+                guard let self else { return }
+                self.isSending = false
+                guard error == nil, let socket, self.socket === socket else {
+                    self.pendingFrame = nil
+                    return
+                }
+                self.sendNewestFrameIfIdle()
+            }
+        }
     }
 }
 
@@ -416,6 +466,7 @@ final class LittleSpudViewModel: ObservableObject {
     private var audioEngine: AVAudioEngine?
     private var voiceTapInstalled = false
     private var satChatWebSocket: URLSessionWebSocketTask?
+    private var satChatVideoFrameSender: SatChatVideoFrameSender?
     private var satChatAudioEngine: AVAudioEngine?
     private var satChatPlayerNode: AVAudioPlayerNode?
     private var satChatTapInstalled = false
@@ -1120,11 +1171,10 @@ final class LittleSpudViewModel: ObservableObject {
         try engine.start()
         player.play()
         if satChatSnapshot.call?.mode.lowercased() == "video" {
-            let capture = SatChatCameraCapture { [weak socket] jpeg in
-                guard let socket else { return }
-                var frame = Data("TSCV1".utf8)
-                frame.append(jpeg)
-                socket.send(.data(frame)) { _ in }
+            let sender = SatChatVideoFrameSender(socket: socket)
+            satChatVideoFrameSender = sender
+            let capture = SatChatCameraCapture { [weak sender] jpeg in
+                sender?.submit(jpeg: jpeg)
             }
             try capture.start()
             satChatCameraCapture = capture
@@ -1187,6 +1237,8 @@ final class LittleSpudViewModel: ObservableObject {
     private func stopSatChatMedia() {
         satChatCameraCapture?.stop()
         satChatCameraCapture = nil
+        satChatVideoFrameSender?.stop()
+        satChatVideoFrameSender = nil
         satChatRemoteVideoFrame = nil
         if satChatTapInstalled {
             satChatAudioEngine?.inputNode.removeTap(onBus: 0)

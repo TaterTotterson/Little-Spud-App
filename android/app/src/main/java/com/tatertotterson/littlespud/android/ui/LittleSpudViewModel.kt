@@ -18,6 +18,7 @@ import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -1201,8 +1202,12 @@ class LittleSpudViewModel(
                 .build()
             analysis.setAnalyzer(satChatCameraExecutor) { frame ->
                 try {
-                    val now = System.currentTimeMillis()
-                    if (now - satChatLastCameraFrameAt < 400 || satChatSocket !== webSocket) return@setAnalyzer
+                    val now = SystemClock.elapsedRealtime()
+                    if (
+                        now - satChatLastCameraFrameAt < SAT_CHAT_VIDEO_FRAME_INTERVAL_MS ||
+                        satChatSocket !== webSocket ||
+                        webSocket.queueSize() > SAT_CHAT_VIDEO_MAX_QUEUED_BYTES
+                    ) return@setAnalyzer
                     satChatLastCameraFrameAt = now
                     val original = frame.toBitmap()
                     val matrix = Matrix().apply {
@@ -1214,7 +1219,10 @@ class LittleSpudViewModel(
                         rotated.compress(Bitmap.CompressFormat.JPEG, 55, output)
                         output.toByteArray()
                     }
-                    if (jpeg.size <= 2 * 1024 * 1024) {
+                    if (
+                        jpeg.size <= SAT_CHAT_VIDEO_MAX_FRAME_BYTES &&
+                        webSocket.queueSize() <= SAT_CHAT_VIDEO_MAX_QUEUED_BYTES
+                    ) {
                         webSocket.send((SAT_CHAT_VIDEO_PREFIX + jpeg).toByteString())
                     }
                     if (rotated !== original) rotated.recycle()
@@ -2422,6 +2430,9 @@ class LittleSpudViewModel(
         const val VOICE_BUFFER_BYTES = 4_096
         const val SAT_CHAT_SAMPLE_RATE = 16_000
         const val SAT_CHAT_BUFFER_BYTES = 1_280
+        const val SAT_CHAT_VIDEO_FRAME_INTERVAL_MS = 50L
+        const val SAT_CHAT_VIDEO_MAX_QUEUED_BYTES = 64L * 1024L
+        const val SAT_CHAT_VIDEO_MAX_FRAME_BYTES = 2 * 1024 * 1024
     }
 }
 
