@@ -1,2 +1,2 @@
-# Little Spud currently keeps release shrinking disabled. This file is reserved
-# for rules needed when release optimization is enabled.
+# Project-specific R8 rules belong here. AndroidX, Firebase, OkHttp, Coil,
+# CameraX, Media3, and Health Connect provide their own consumer rules.

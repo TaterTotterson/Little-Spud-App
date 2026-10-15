@@ -4,12 +4,17 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to rebuild and replace assets for
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-builds-${{ github.event.release.tag_name || github.ref }}
+  group: release-builds-${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,7 +39,7 @@ jobs:
       - name: Set release version
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           raw_version="${RELEASE_TAG:-run-${GITHUB_RUN_NUMBER}}"
           version_name="${raw_version#v}"
@@ -142,7 +147,7 @@ jobs:
       - name: Set release label
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           raw_version="${RELEASE_TAG:-run-${GITHUB_RUN_NUMBER}}"
           version_label="$(printf '%s' "$raw_version" | tr -c 'A-Za-z0-9._-' '-')"
@@ -181,7 +186,7 @@ jobs:
 
   publish:
     name: Attach assets to GitHub Release
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || inputs.release_tag != ''
     needs: [android, ios]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -211,5 +216,5 @@ jobs:
       - name: Upload assets to release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
