@@ -7,12 +7,14 @@ package com.tatertotterson.littlespud.android.ui
 
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -87,6 +89,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -121,6 +124,8 @@ import com.tatertotterson.littlespud.android.ui.theme.SpudMuted
 import com.tatertotterson.littlespud.android.ui.theme.SpudOrange
 import com.tatertotterson.littlespud.android.ui.theme.SpudPanel
 import com.tatertotterson.littlespud.android.ui.theme.SpudPanelRaised
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlin.math.roundToInt
 
 @Composable
@@ -986,6 +991,196 @@ private fun ThermostatControl(
                     enabled = !busy,
                 )
             }
+        }
+    }
+}
+
+private data class CameraFeed(
+    val roomId: String,
+    val roomName: String,
+    val cameraId: String,
+    val cameraName: String,
+) {
+    val key: String get() = "$roomId|$cameraId"
+}
+
+@Composable
+fun CamerasScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
+    val feeds = remember(state.home.rooms) {
+        state.home.rooms.flatMap { room ->
+            room.cameras?.cameraPreviews.orEmpty().map { camera ->
+                CameraFeed(room.id, room.name, camera.id, camera.label)
+            }
+        }.sortedWith(compareBy({ it.roomName.lowercase() }, { it.cameraName.lowercase() }))
+    }
+    var selectedKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val selected = feeds.firstOrNull { it.key == selectedKey }
+
+    LaunchedEffect(Unit) {
+        model.refreshHome()
+    }
+    LaunchedEffect(feeds.map { it.key }) {
+        if (selectedKey != null && feeds.none { it.key == selectedKey }) selectedKey = null
+    }
+
+    if (selected != null) {
+        CameraLiveScreen(
+            feed = selected,
+            state = state,
+            model = model,
+            onClose = { selectedKey = null },
+        )
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Live cameras", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("Choose a camera or doorbell to open its live view.", color = SpudMuted)
+            }
+        }
+        when {
+            state.homeLoading && feeds.isEmpty() -> item {
+                Row(
+                    Modifier.fillMaxWidth().height(140.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Loading cameras…", color = SpudMuted)
+                }
+            }
+            feeds.isEmpty() -> item {
+                Card(colors = CardDefaults.cardColors(containerColor = SpudPanel), modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(Icons.Default.CameraAlt, null, tint = SpudMuted, modifier = Modifier.size(46.dp))
+                        Text("No camera feeds available", fontWeight = FontWeight.Bold)
+                        Text(
+                            state.homeError.ifBlank { "Add a camera integration in Tater to see it here." },
+                            color = if (state.homeError.isBlank()) SpudMuted else SpudDanger,
+                        )
+                    }
+                }
+            }
+            else -> items(feeds, key = { it.key }) { feed ->
+                val bytes = state.cameraSnapshots[feed.key]
+                val preview = remember(bytes) {
+                    bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { selectedKey = feed.key },
+                    colors = CardDefaults.cardColors(containerColor = SpudPanel),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Box(
+                            Modifier.size(width = 84.dp, height = 58.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(SpudPanelRaised),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (preview != null) {
+                                Image(preview, feed.cameraName, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            } else {
+                                Icon(Icons.Default.CameraAlt, null, tint = SpudOrange, modifier = Modifier.size(28.dp))
+                            }
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(feed.cameraName, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(feed.roomName, style = MaterialTheme.typography.labelMedium, color = SpudMuted, maxLines = 1)
+                        }
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(SpudGreen))
+                        Icon(Icons.Default.ChevronRight, null, tint = SpudMuted)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CameraLiveScreen(
+    feed: CameraFeed,
+    state: LittleSpudUiState,
+    model: LittleSpudViewModel,
+    onClose: () -> Unit,
+) {
+    val bytes = state.cameraSnapshots[feed.key]
+    val image = remember(bytes) {
+        bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    val error = state.cameraErrors[feed.key].orEmpty()
+    val loading = feed.key in state.cameraLoading
+
+    LaunchedEffect(feed.key) {
+        while (isActive) {
+            val started = SystemClock.elapsedRealtime()
+            model.refreshCameraFrame(feed.roomId, feed.cameraId)
+            val remaining = (350L - (SystemClock.elapsedRealtime() - started)).coerceAtLeast(50L)
+            delay(remaining)
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                IconButton(onClick = onClose) { Icon(Icons.Default.ChevronLeft, "Back to cameras") }
+                Column(Modifier.weight(1f)) {
+                    Text(feed.cameraName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(feed.roomName, style = MaterialTheme.typography.labelMedium, color = SpudMuted)
+                }
+                Row(
+                    Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.46f)).padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(SpudGreen))
+                    Text("LIVE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = SpudGreen)
+                }
+            }
+        }
+        item {
+            Box(
+                Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(20.dp)).background(Color.Black),
+                contentAlignment = Alignment.Center,
+            ) {
+                when {
+                    image != null -> Image(image, feed.cameraName, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                    loading -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+                        Text("Connecting to camera…", color = SpudMuted, fontWeight = FontWeight.SemiBold)
+                    }
+                    else -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Default.CameraAlt, null, tint = if (error.isBlank()) SpudMuted else SpudDanger, modifier = Modifier.size(44.dp))
+                        Text(if (error.isBlank()) "Waiting for camera" else "Camera unavailable", color = SpudMuted, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+        if (error.isNotBlank()) item {
+            Card(colors = CardDefaults.cardColors(containerColor = SpudDanger.copy(alpha = 0.14f))) {
+                Text(error, color = SpudDanger, modifier = Modifier.fillMaxWidth().padding(12.dp))
+            }
+        }
+        item {
+            Text("Live view updates continuously while this screen is open.", style = MaterialTheme.typography.labelMedium, color = SpudMuted)
         }
     }
 }

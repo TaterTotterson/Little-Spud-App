@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import CryptoKit
 import Foundation
 import MediaPlayer
@@ -114,6 +115,68 @@ actor LittleSpudMusicArtworkCache {
     }
 }
 
+private final class SatChatCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private let session = AVCaptureSession()
+    private let captureQueue = DispatchQueue(label: "com.tatertotterson.littlespud.satchat.camera")
+    private let frameQueue = DispatchQueue(label: "com.tatertotterson.littlespud.satchat.frames")
+    private let context = CIContext(options: [.cacheIntermediates: false])
+    private let onFrame: (Data) -> Void
+    private var lastFrameAt = CFAbsoluteTime(0)
+
+    init(onFrame: @escaping (Data) -> Void) {
+        self.onFrame = onFrame
+        super.init()
+    }
+
+    func start() throws {
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+            ?? AVCaptureDevice.default(for: .video) else {
+            throw SpudLinkAPIError.message("This device does not have an available Sat Chat camera.")
+        }
+        session.beginConfiguration()
+        session.sessionPreset = .vga640x480
+        defer { session.commitConfiguration() }
+        let input = try AVCaptureDeviceInput(device: camera)
+        guard session.canAddInput(input) else {
+            throw SpudLinkAPIError.message("Little Spud could not open the Sat Chat camera.")
+        }
+        session.addInput(input)
+        let output = AVCaptureVideoDataOutput()
+        output.alwaysDiscardsLateVideoFrames = true
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+        ]
+        output.setSampleBufferDelegate(self, queue: frameQueue)
+        guard session.canAddOutput(output) else {
+            throw SpudLinkAPIError.message("Little Spud could not start Sat Chat video.")
+        }
+        session.addOutput(output)
+        captureQueue.async { [session] in session.startRunning() }
+    }
+
+    func stop() {
+        captureQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastFrameAt >= 0.4,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastFrameAt = now
+        let source = CIImage(cvPixelBuffer: pixelBuffer).oriented(.leftMirrored)
+        guard let cgImage = context.createCGImage(source, from: source.extent),
+              let jpeg = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.55),
+              jpeg.count <= 2 * 1024 * 1024 else { return }
+        onFrame(jpeg)
+    }
+}
+
 @MainActor
 final class LittleSpudViewModel: ObservableObject {
     @Published var userName = ""
@@ -151,10 +214,23 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var musicLoading = false
     @Published private(set) var musicTransportLoading = false
     @Published var musicError = ""
+    @Published var fitnessSnapshot: LittleSpudFitnessSnapshot = .empty
+    @Published var fitnessLoading = false
+    @Published var fitnessError = ""
+    @Published var fitnessCoreAvailable = false
+    @Published var fitnessHealthConnected = FitnessHealthStore.shared.syncEnabled
+    @Published var fitnessHealthAvailable = FitnessHealthStore.shared.isAvailable
+    @Published var personSettings: LittleSpudPersonSettings = .empty
+    @Published var personLinkLoading = false
+    @Published var personLinkError = ""
     @Published var musicQuery = ""
     @Published var selectedMusicTargetIDs: Set<String> = []
     @Published var musicVolumePercent = 75
     @Published var musicProgressSeconds: Double = 0
+    @Published var satChatSnapshot: LittleSpudSatChatSnapshot = .empty
+    @Published var satChatLoading = false
+    @Published var satChatError = ""
+    @Published var satChatRemoteVideoFrame: UIImage?
     @Published var localMusicTrack: LittleSpudMusicTrack?
     @Published var localMusicStatus = "idle"
     @Published private(set) var localMusicQueue: [LittleSpudMusicTrack] = []
@@ -168,13 +244,21 @@ final class LittleSpudViewModel: ObservableObject {
             if activeLane != .music {
                 stopMusicStateSync()
             }
+            if activeLane != .fitness {
+                fitnessStateSyncTask?.cancel()
+                fitnessStateSyncTask = nil
+            }
             if activeLane == .notifications {
                 markNotificationsRead()
-            } else if activeLane == .home {
+            } else if activeLane == .home || activeLane == .cameras {
                 refreshHome()
             } else if activeLane == .music {
                 refreshMusic()
                 startMusicStateSync()
+            } else if activeLane == .satChat {
+                refreshSatChat()
+            } else if activeLane == .fitness {
+                refreshFitness(syncHealth: true)
             }
         }
     }
@@ -331,6 +415,12 @@ final class LittleSpudViewModel: ObservableObject {
     private var speechWebSocket: URLSessionWebSocketTask?
     private var audioEngine: AVAudioEngine?
     private var voiceTapInstalled = false
+    private var satChatWebSocket: URLSessionWebSocketTask?
+    private var satChatAudioEngine: AVAudioEngine?
+    private var satChatPlayerNode: AVAudioPlayerNode?
+    private var satChatTapInstalled = false
+    private var satChatScheduledBuffers = 0
+    private var satChatCameraCapture: SatChatCameraCapture?
     private var pendingReopenTask: Task<Void, Never>?
     private var demoVoiceTask: Task<Void, Never>?
     private var activeChatRunCount = 0
@@ -341,9 +431,12 @@ final class LittleSpudViewModel: ObservableObject {
     private var pushRegistrationFingerprintInFlight = ""
     private var remotePushRegistrationUnsupported = false
     private var pendingNotificationAckIDs: Set<String> = []
+    private var lastNotificationReconcileAt = Date.distantPast
     private var lastStreamHapticByMessageId: [String: Date] = [:]
     private var homeTask: Task<Void, Never>?
     private var musicTask: Task<Void, Never>?
+    private var fitnessTask: Task<Void, Never>?
+    private var fitnessStateSyncTask: Task<Void, Never>?
     private var musicStateSyncTask: Task<Void, Never>?
     private var musicProgressTask: Task<Void, Never>?
     private var localMusicContinuationTask: Task<Void, Never>?
@@ -395,11 +488,11 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     func resume() {
-        guard session != nil else { return }
+        guard let currentSession = session else { return }
         endBackgroundGracePeriod()
         if isDemoMode {
             hubConnected = true
-            if activeLane == .home {
+            if activeLane == .home || activeLane == .cameras {
                 refreshHome()
             } else if activeLane == .music {
                 refreshMusic()
@@ -412,8 +505,17 @@ final class LittleSpudViewModel: ObservableObject {
         if activeLane == .music {
             refreshMusic()
             startMusicStateSync()
+        } else if activeLane == .satChat {
+            refreshSatChat()
+        } else if activeLane == .fitness {
+            refreshFitness(syncHealth: true)
         }
         syncRemotePushRegistrationIfPossible()
+        if FitnessHealthStore.shared.syncEnabled,
+           activeLane != .fitness,
+           FitnessHealthStore.shared.coreAvailable(session: currentSession) {
+            syncFitnessFromHealth(showStatus: false)
+        }
         Task { [weak self] in
             await self?.refreshFromHub(showStatus: false)
         }
@@ -423,9 +525,12 @@ final class LittleSpudViewModel: ObservableObject {
         routeProbeTask?.cancel()
         routeProbeTask = nil
         stopMusicStateSync()
+        fitnessStateSyncTask?.cancel()
+        fitnessStateSyncTask = nil
         demoVoiceTask?.cancel()
         demoVoiceTask = nil
         cancelVoiceInput()
+        stopSatChatMedia()
         if pollTask != nil || activeChatRunCount > 0 {
             beginBackgroundGracePeriod()
         } else {
@@ -617,7 +722,7 @@ final class LittleSpudViewModel: ObservableObject {
                     messages: priorMessages,
                     text: text,
                     attachments: outgoingAttachments,
-                    onToolNotice: { notice in
+                    onToolNotice: { [weak self] notice in
                         Task { @MainActor [weak self] in
                             self?.appendToolNotice(notice, beforeAssistantId: assistantId)
                         }
@@ -914,6 +1019,189 @@ final class LittleSpudViewModel: ObservableObject {
         activeLane = .music
     }
 
+    func refreshSatChat() {
+        guard let currentSession = session else { return }
+        if currentSession.isDemo {
+            satChatSnapshot = .empty
+            satChatLoading = false
+            return
+        }
+        satChatLoading = true
+        satChatError = ""
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                satChatSnapshot = try await api.fetchSatChat(session: currentSession)
+            } catch {
+                satChatError = error.localizedDescription
+            }
+            satChatLoading = false
+        }
+    }
+
+    func startSatChat(with participant: LittleSpudSatChatParticipant) {
+        guard let currentSession = session, !participant.busy else { return }
+        satChatLoading = true
+        satChatError = ""
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard await Self.requestMicrophonePermission() else {
+                    throw SpudLinkAPIError.message("Microphone access is required for Sat Chat.")
+                }
+                let mode = participant.video ? "video" : "audio"
+                if mode == "video", !(await Self.requestCameraPermission()) {
+                    throw SpudLinkAPIError.message("Camera access is required for video Sat Chat.")
+                }
+                satChatSnapshot = try await api.controlSatChat(
+                    session: currentSession,
+                    action: "start",
+                    target: participant.id,
+                    mode: mode
+                )
+                try startSatChatMedia(session: currentSession)
+            } catch {
+                satChatError = error.localizedDescription
+                if let call = satChatSnapshot.call {
+                    _ = try? await api.controlSatChat(session: currentSession, action: "end", callID: call.id)
+                    satChatSnapshot.call = nil
+                }
+            }
+            satChatLoading = false
+        }
+    }
+
+    func endSatChat() {
+        guard let currentSession = session, let call = satChatSnapshot.call else { return }
+        satChatLoading = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            stopSatChatMedia()
+            do {
+                satChatSnapshot = try await api.controlSatChat(session: currentSession, action: "end", callID: call.id)
+            } catch {
+                satChatError = error.localizedDescription
+            }
+            satChatLoading = false
+        }
+    }
+
+    private func startSatChatMedia(session: LittleSpudSession) throws {
+        stopSatChatMedia()
+        try configureAudioSessionForSatChat()
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        guard let playbackFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw SpudLinkAPIError.message("Sat Chat playback format is unavailable.")
+        }
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+        let input = engine.inputNode
+        let inputFormat = input.outputFormat(forBus: 0)
+        let socket = URLSession.shared.webSocketTask(
+            with: try api.satChatMediaURL(session: session, sampleRate: Int(inputFormat.sampleRate.rounded()))
+        )
+        satChatWebSocket = socket
+        satChatAudioEngine = engine
+        satChatPlayerNode = player
+        socket.resume()
+        receiveSatChatMedia(socket)
+        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { [weak socket] buffer, _ in
+            guard let socket else { return }
+            let data = Self.pcm16Data(from: buffer)
+            if !data.isEmpty { socket.send(.data(data)) { _ in } }
+        }
+        satChatTapInstalled = true
+        try engine.start()
+        player.play()
+        if satChatSnapshot.call?.mode.lowercased() == "video" {
+            let capture = SatChatCameraCapture { [weak socket] jpeg in
+                guard let socket else { return }
+                var frame = Data("TSCV1".utf8)
+                frame.append(jpeg)
+                socket.send(.data(frame)) { _ in }
+            }
+            try capture.start()
+            satChatCameraCapture = capture
+        }
+    }
+
+    private func receiveSatChatMedia(_ socket: URLSessionWebSocketTask) {
+        socket.receive { [weak self, weak socket] result in
+            Task { @MainActor in
+                guard let self, let socket, self.satChatWebSocket === socket else { return }
+                switch result {
+                case .success(let message):
+                    if case .data(let data) = message {
+                        if data.starts(with: Data("TSCV1".utf8)), data.count > 9 {
+                            self.satChatRemoteVideoFrame = UIImage(data: Data(data.dropFirst(5)))
+                        } else {
+                            self.playSatChatPCM(data)
+                        }
+                    } else if case .string(let text) = message,
+                              let data = text.data(using: .utf8),
+                              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              (payload["type"] as? String) == "sat_chat.ended" {
+                        self.stopSatChatMedia()
+                        self.satChatSnapshot.call = nil
+                        self.refreshSatChat()
+                        return
+                    }
+                    self.receiveSatChatMedia(socket)
+                case .failure(let error):
+                    self.satChatError = "Sat Chat media disconnected: \(error.localizedDescription)"
+                    self.stopSatChatMedia()
+                    self.refreshSatChat()
+                }
+            }
+        }
+    }
+
+    private func playSatChatPCM(_ data: Data) {
+        guard let player = satChatPlayerNode, data.count >= 2,
+              satChatScheduledBuffers < 12,
+              let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(data.count / 2)),
+              let channel = buffer.int16ChannelData?[0]
+        else { return }
+        buffer.frameLength = buffer.frameCapacity
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            memcpy(channel, base, data.count)
+        }
+        satChatScheduledBuffers += 1
+        player.scheduleBuffer(buffer) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.satChatScheduledBuffers = max(0, self.satChatScheduledBuffers - 1)
+            }
+        }
+        if !player.isPlaying { player.play() }
+    }
+
+    private func stopSatChatMedia() {
+        satChatCameraCapture?.stop()
+        satChatCameraCapture = nil
+        satChatRemoteVideoFrame = nil
+        if satChatTapInstalled {
+            satChatAudioEngine?.inputNode.removeTap(onBus: 0)
+            satChatTapInstalled = false
+        }
+        satChatPlayerNode?.stop()
+        satChatAudioEngine?.stop()
+        satChatWebSocket?.cancel(with: .goingAway, reason: nil)
+        satChatWebSocket = nil
+        satChatPlayerNode = nil
+        satChatAudioEngine = nil
+        satChatScheduledBuffers = 0
+        deactivateAudioSessionIfIdle()
+    }
+
     func toggleNotificationLane() {
         activeLane = activeLane == .notifications ? .chat : .notifications
     }
@@ -1051,6 +1339,247 @@ final class LittleSpudViewModel: ObservableObject {
                     musicError = "Start Music Core in Tater before using this player."
                 } else {
                     musicError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func refreshFitness(syncHealth: Bool = false) {
+        guard let currentSession = session else { return }
+        if currentSession.isDemo {
+            fitnessSnapshot = .empty
+            fitnessError = "Pair with Tater and install Fitness Core to use health sync."
+            return
+        }
+        if syncHealth, fitnessHealthConnected {
+            syncFitnessFromHealth(showStatus: false)
+            return
+        }
+        fitnessTask?.cancel()
+        fitnessLoading = true
+        fitnessError = ""
+        fitnessTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.fitnessLoading = false; self.fitnessTask = nil }
+            do {
+                self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
+                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
+                self.fitnessCoreAvailable = true
+                self.fitnessError = ""
+                if self.activeLane == .fitness { self.startFitnessStateSync() }
+            } catch {
+                guard !Task.isCancelled else { return }
+                if FitnessHealthStore.isCoreUnavailable(error) {
+                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
+                    self.fitnessCoreAvailable = false
+                    self.fitnessStateSyncTask?.cancel()
+                    self.fitnessStateSyncTask = nil
+                }
+                self.fitnessError = self.friendlyFitnessError(error)
+            }
+        }
+    }
+
+    func connectFitnessHealth() {
+        guard let currentSession = session, !currentSession.isDemo else { return }
+        guard fitnessHealthAvailable else {
+            fitnessError = "Apple Health is not available on this device."
+            return
+        }
+        fitnessLoading = true
+        fitnessError = ""
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.api.fetchFitness(session: currentSession, refresh: false)
+                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
+                self.fitnessCoreAvailable = true
+                try await FitnessHealthStore.shared.requestAccess()
+                self.fitnessHealthConnected = true
+                self.syncFitnessFromHealth(showStatus: true)
+            } catch {
+                if FitnessHealthStore.isCoreUnavailable(error) {
+                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
+                    self.fitnessCoreAvailable = false
+                }
+                self.fitnessLoading = false
+                self.fitnessError = self.friendlyFitnessError(error)
+            }
+        }
+    }
+
+    func syncFitnessFromHealth(showStatus: Bool = false) {
+        guard let currentSession = session,
+              !currentSession.isDemo,
+              FitnessHealthStore.shared.syncEnabled else { return }
+        fitnessTask?.cancel()
+        fitnessLoading = true
+        fitnessError = ""
+        fitnessTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.fitnessLoading = false; self.fitnessTask = nil }
+            do {
+                let availableSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
+                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
+                self.fitnessCoreAvailable = true
+                if self.activeLane == .fitness { self.startFitnessStateSync() }
+                let canReadHealth = try await FitnessHealthStore.shared.prepareForSync(requestIfNeeded: true)
+                guard canReadHealth else {
+                    self.fitnessSnapshot = availableSnapshot
+                    self.fitnessError = ""
+                    return
+                }
+                let plan = try await FitnessHealthStore.shared.pendingDailyTotals(session: currentSession)
+                if plan.days.isEmpty {
+                    self.fitnessSnapshot = availableSnapshot
+                } else {
+                    self.fitnessSnapshot = try await self.api.syncFitness(
+                        session: currentSession,
+                        platform: "ios-healthkit",
+                        timeZone: TimeZone.autoupdatingCurrent.identifier,
+                        permissions: FitnessHealthStore.permissionNames,
+                        days: plan.days
+                    )
+                }
+                FitnessHealthStore.shared.markDailyTotalsSynced(plan, session: currentSession)
+                self.fitnessHealthConnected = true
+                self.fitnessError = ""
+                if showStatus { self.statusText = "Fitness totals synced privately with Tater." }
+            } catch {
+                guard !Task.isCancelled else { return }
+                if FitnessHealthStore.isCoreUnavailable(error) {
+                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
+                    self.fitnessCoreAvailable = false
+                    self.fitnessStateSyncTask?.cancel()
+                    self.fitnessStateSyncTask = nil
+                }
+                if FitnessHealthStore.shared.isAuthorizationPending(error) {
+                    do {
+                        self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
+                        self.fitnessError = ""
+                    } catch {
+                        self.fitnessError = self.friendlyFitnessError(error)
+                    }
+                    return
+                }
+                self.fitnessError = self.friendlyFitnessError(error)
+            }
+        }
+    }
+
+    func refreshPersonSettings() {
+        guard let currentSession = session else { return }
+        guard !currentSession.isDemo else { return }
+        personLinkLoading = true
+        personLinkError = ""
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.personLinkLoading = false }
+            do {
+                self.personSettings = try await self.api.fetchPersonSettings(session: currentSession)
+            } catch { self.personLinkError = error.localizedDescription }
+        }
+    }
+
+    func saveLinkedPerson(_ personID: String) {
+        guard let currentSession = session, !personID.isEmpty else { return }
+        personLinkLoading = true
+        personLinkError = ""
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.personLinkLoading = false }
+            do {
+                self.personSettings = try await self.api.saveLinkedPerson(session: currentSession, personID: personID)
+                FitnessHealthStore.shared.resetSyncHistory(session: currentSession)
+                self.statusText = "Little Spud is linked to \(self.personSettings.linkedPersonName)."
+                self.refreshFitness(syncHealth: self.fitnessHealthConnected)
+            } catch { self.personLinkError = error.localizedDescription }
+        }
+    }
+
+    func runFitnessChallenge(
+        action: String,
+        personID: String = "",
+        challengeID: String = "",
+        duration: String = "day",
+        metric: String = "steps"
+    ) {
+        guard let currentSession = session else { return }
+        fitnessLoading = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.fitnessLoading = false }
+            do {
+                self.fitnessSnapshot = try await self.api.runFitnessChallenge(
+                    session: currentSession,
+                    action: action,
+                    personID: personID,
+                    challengeID: challengeID,
+                    duration: duration,
+                    metric: metric,
+                    value: self.currentFitnessChallengeValue(metric: metric)
+                )
+                self.fitnessError = ""
+            } catch { self.fitnessError = error.localizedDescription }
+        }
+    }
+
+    private func currentFitnessChallengeValue(metric: String) -> Double? {
+        guard let today = fitnessSnapshot.today else { return nil }
+        switch metric {
+        case "steps": return today.steps.map(Double.init)
+        case "distance_m": return today.distanceMeters
+        case "exercise_minutes": return today.exerciseMinutes
+        case "workouts": return today.workouts.map(Double.init)
+        case "active_energy_kcal": return today.activeEnergyKcal
+        case "weight_checkins": return today.weightKilograms.map { _ in 1.0 }
+        default: return nil
+        }
+    }
+
+    private func friendlyFitnessError(_ error: Error) -> String {
+        let status = (error as? SpudLinkAPIError)?.statusCode
+        let message = error.localizedDescription
+        if status == 409, message.localizedCaseInsensitiveContains("link little spud") {
+            return message
+        }
+        return status == 404 || status == 409
+            ? "Install and start Fitness Core from Tater Shop."
+            : message
+    }
+
+    private func startFitnessStateSync() {
+        fitnessStateSyncTask?.cancel()
+        guard let currentSession = session,
+              FitnessHealthStore.shared.coreAvailable(session: currentSession) else {
+            fitnessStateSyncTask = nil
+            return
+        }
+        fitnessStateSyncTask = Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self, self.activeLane == .fitness, let currentSession = self.session else { break }
+                tick += 1
+                if tick.isMultiple(of: 20),
+                   self.fitnessHealthConnected,
+                   self.fitnessSnapshot.challenges.contains(where: { $0.state == "active" }) {
+                    self.syncFitnessFromHealth(showStatus: false)
+                    continue
+                }
+                do {
+                    self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
+                    FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
+                    self.fitnessCoreAvailable = true
+                    self.fitnessError = ""
+                } catch {
+                    guard !Task.isCancelled else { break }
+                    if FitnessHealthStore.isCoreUnavailable(error) {
+                        FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
+                        self.fitnessCoreAvailable = false
+                        self.fitnessError = self.friendlyFitnessError(error)
+                        break
+                    }
                 }
             }
         }
@@ -2375,6 +2904,7 @@ final class LittleSpudViewModel: ObservableObject {
         stopLocalMusic(clearTrack: true)
         stopSpeech()
         cancelVoiceInput()
+        stopSatChatMedia()
         KeychainStore.delete(account: sessionAccount)
         LittleSpudShared.clearNotificationContext()
         _ = LittleSpudShared.consumeResolvedNotifications()
@@ -2535,7 +3065,8 @@ final class LittleSpudViewModel: ObservableObject {
             updateAssistantName(syncState.assistantName)
             mergeHubHistory(syncState.messages)
             mergeActiveRuns(syncState.activeRuns)
-            if activeLane == .home {
+            await reconcileAwarenessNotifications(session: updated)
+            if activeLane == .home || activeLane == .cameras {
                 refreshHome()
             }
             if showStatus {
@@ -2560,6 +3091,45 @@ final class LittleSpudViewModel: ObservableObject {
         current.assistantName = clean
         session = current
         saveSession()
+    }
+
+    private func reconcileAwarenessNotifications(session: LittleSpudSession) async {
+        guard Date().timeIntervalSince(lastNotificationReconcileAt) >= 60 else { return }
+        let eventIDs = Array(Set(notifications.compactMap(\.awarenessEventID))).sorted()
+        let legacyNotifications = notifications.compactMap { message -> [String: String]? in
+            guard message.awarenessEventID == nil else { return nil }
+            let title = message.notificationTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let body = message.notificationBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !title.isEmpty || !body.isEmpty else { return nil }
+            return [
+                "id": message.id,
+                "title": title,
+                "message": body,
+                "created_at": String(message.createdAt.timeIntervalSince1970),
+            ]
+        }
+        guard !eventIDs.isEmpty || !legacyNotifications.isEmpty else { return }
+        lastNotificationReconcileAt = Date()
+        do {
+            guard let result = try await api.reconcileAwarenessNotifications(
+                session: session,
+                eventIDs: eventIDs,
+                legacyNotifications: legacyNotifications
+            ) else { return }
+            let before = notifications.count
+            notifications.removeAll { message in
+                if let eventID = message.awarenessEventID {
+                    return !result.activeEventIDs.contains(eventID)
+                }
+                return result.missingNotificationIDs.contains(message.id)
+            }
+            guard notifications.count != before else { return }
+            notificationUnreadCount = min(notificationUnreadCount, notifications.count)
+            saveNotifications()
+        } catch {
+            // Older Tater versions do not provide reconciliation. Keep local cards
+            // unless the server explicitly returns an authoritative event list.
+        }
     }
 
     private func beginBackgroundGracePeriod() {
@@ -2813,7 +3383,9 @@ final class LittleSpudViewModel: ObservableObject {
             attachments: notification.attachments,
             notificationTitle: notification.title,
             notificationBody: notification.message,
-            notificationPriority: notification.priority
+            notificationPriority: notification.priority,
+            notificationSource: notification.source,
+            notificationSourceEventID: notification.sourceEventID
         )
         appendNotificationMessage(message)
         // Remote push owns device notifications on iOS. Polling only updates chat
@@ -3270,6 +3842,17 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
+    nonisolated private static func requestCameraPermission() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .video)
+        default:
+            return false
+        }
+    }
+
     nonisolated private static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data {
         guard let channels = buffer.floatChannelData else { return Data() }
         let channel = channels[0]
@@ -3412,6 +3995,16 @@ final class LittleSpudViewModel: ObservableObject {
         try audioSession.setActive(true)
     }
 
+    private func configureAudioSessionForSatChat() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(
+            .playAndRecord,
+            mode: .voiceChat,
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
+        )
+        try audioSession.setActive(true)
+    }
+
     private func deactivateAudioSessionIfIdle() {
         if localMusicPlayer != nil {
             let audioSession = AVAudioSession.sharedInstance()
@@ -3421,6 +4014,7 @@ final class LittleSpudViewModel: ObservableObject {
         }
         guard audioPlayer == nil,
               audioEngine == nil,
+              satChatAudioEngine == nil,
               !speechSynthesizer.isSpeaking
         else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
@@ -3546,9 +4140,12 @@ final class LittleSpudViewModel: ObservableObject {
                         type: attachment.type,
                         size: attachment.size,
                         previewUrl: attachment.url,
-                        dataUrl: ""
+                        dataUrl: "",
+                        expiresAt: nil
                     )
-                }
+                },
+                source: item.source ?? "",
+                sourceEventID: item.sourceEventID ?? ""
             )
             appendNotificationMessage(LittleSpudMessage(
                 id: notification.id,
@@ -3559,7 +4156,9 @@ final class LittleSpudViewModel: ObservableObject {
                 attachments: notification.attachments,
                 notificationTitle: notification.title,
                 notificationBody: notification.message,
-                notificationPriority: notification.priority
+                notificationPriority: notification.priority,
+                notificationSource: notification.source,
+                notificationSourceEventID: notification.sourceEventID
             ))
         }
     }
@@ -3574,7 +4173,9 @@ final class LittleSpudViewModel: ObservableObject {
             attachments: message.attachments,
             notificationTitle: message.notificationTitle,
             notificationBody: message.notificationBody,
-            notificationPriority: message.notificationPriority
+            notificationPriority: message.notificationPriority,
+            notificationSource: message.notificationSource,
+            notificationSourceEventID: message.notificationSourceEventID
         )
         guard mergeStoredNotificationMessage(normalized) else { return }
         sortAndLimitNotifications()

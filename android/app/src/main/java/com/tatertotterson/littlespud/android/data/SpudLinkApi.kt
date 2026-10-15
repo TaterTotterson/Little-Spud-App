@@ -6,6 +6,11 @@ import android.util.Base64
 import com.tatertotterson.littlespud.android.BuildConfig
 import com.tatertotterson.littlespud.android.model.CameraPreview
 import com.tatertotterson.littlespud.android.model.ConnectionRoute
+import com.tatertotterson.littlespud.android.model.FitnessChallenge
+import com.tatertotterson.littlespud.android.model.FitnessChallengeType
+import com.tatertotterson.littlespud.android.model.FitnessDay
+import com.tatertotterson.littlespud.android.model.FitnessInsight
+import com.tatertotterson.littlespud.android.model.FitnessSnapshot
 import com.tatertotterson.littlespud.android.model.HomeCategory
 import com.tatertotterson.littlespud.android.model.HomeRoom
 import com.tatertotterson.littlespud.android.model.HomeSnapshot
@@ -24,7 +29,12 @@ import com.tatertotterson.littlespud.android.model.MusicSnapshot
 import com.tatertotterson.littlespud.android.model.MusicTarget
 import com.tatertotterson.littlespud.android.model.MusicTrack
 import com.tatertotterson.littlespud.android.model.PairingInput
+import com.tatertotterson.littlespud.android.model.PersonOption
+import com.tatertotterson.littlespud.android.model.PersonSettings
 import com.tatertotterson.littlespud.android.model.PushRegistration
+import com.tatertotterson.littlespud.android.model.SatChatCall
+import com.tatertotterson.littlespud.android.model.SatChatParticipant
+import com.tatertotterson.littlespud.android.model.SatChatSnapshot
 import com.tatertotterson.littlespud.android.model.booleanOrNull
 import com.tatertotterson.littlespud.android.model.dateMillis
 import com.tatertotterson.littlespud.android.model.doubleOrNull
@@ -211,6 +221,133 @@ class SpudLinkApi(
         return normalizeHomeSnapshot(payload)
     }
 
+    suspend fun fetchSatChat(session: LittleSpudSession): SatChatSnapshot = normalizeSatChatSnapshot(
+        executeJson(
+            authorizedRequest(session, "/api/spudlink/v1/sat-chat").get().build(),
+            "Sat Chat sync",
+            15,
+        )
+    )
+
+    suspend fun controlSatChat(
+        session: LittleSpudSession,
+        action: String,
+        target: String = "",
+        callId: String = "",
+        mode: String = "audio",
+    ): SatChatSnapshot {
+        val body = JSONObject().apply {
+            put("action", action)
+            put("mode", if (mode.equals("video", true)) "video" else "audio")
+            if (target.isNotBlank()) put("target", target)
+            if (callId.isNotBlank()) put("call_id", callId)
+        }
+        executeJson(
+            authorizedRequest(session, "/api/spudlink/v1/sat-chat")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
+            "Sat Chat",
+            20,
+        )
+        return fetchSatChat(session)
+    }
+
+    suspend fun fetchFitness(session: LittleSpudSession, refresh: Boolean = false): FitnessSnapshot =
+        normalizeFitnessSnapshot(
+            executeJson(
+                authorizedRequest(session, "/api/spudlink/v1/fitness?refresh=$refresh").get().build(),
+                "Fitness",
+                25,
+            ),
+        )
+
+    suspend fun syncFitness(
+        session: LittleSpudSession,
+        platform: String,
+        timeZone: String,
+        permissions: Set<String>,
+        days: List<FitnessDay>,
+    ): FitnessSnapshot {
+        val body = JSONObject().apply {
+            put("platform", platform)
+            put("time_zone", timeZone)
+            put("permissions", permissions.toJsonArray { it })
+            put("days", days.take(120).toJsonArray { day ->
+                JSONObject().apply {
+                    put("date", day.date)
+                    day.steps?.let { put("steps", it) }
+                    day.distanceMeters?.let { put("distance_m", it) }
+                    day.activeEnergyKcal?.let { put("active_energy_kcal", it) }
+                    day.exerciseMinutes?.let { put("exercise_minutes", it) }
+                    day.workouts?.let { put("workouts", it) }
+                    day.sleepMinutes?.let { put("sleep_minutes", it) }
+                    day.sleepCoreMinutes?.let { put("sleep_core_minutes", it) }
+                    day.sleepDeepMinutes?.let { put("sleep_deep_minutes", it) }
+                    day.sleepRemMinutes?.let { put("sleep_rem_minutes", it) }
+                    day.sleepAwakeMinutes?.let { put("sleep_awake_minutes", it) }
+                    day.heartRateAverage?.let { put("heart_rate_avg_bpm", it) }
+                    day.heartRateMinimum?.let { put("heart_rate_min_bpm", it) }
+                    day.heartRateMaximum?.let { put("heart_rate_max_bpm", it) }
+                    day.restingHeartRate?.let { put("resting_heart_rate_bpm", it) }
+                    day.heartRateVariability?.let { put("heart_rate_variability_ms", it) }
+                    day.bloodPressureSystolic?.let { put("blood_pressure_systolic_mmhg", it) }
+                    day.bloodPressureDiastolic?.let { put("blood_pressure_diastolic_mmhg", it) }
+                    day.oxygenSaturationPercent?.let { put("oxygen_saturation_percent", it) }
+                    day.respiratoryRate?.let { put("respiratory_rate_per_min", it) }
+                    day.weightKilograms?.let { put("weight_kg", it) }
+                    day.bodyFatPercent?.let { put("body_fat_percent", it) }
+                }
+            })
+        }
+        return normalizeFitnessSnapshot(
+            executeJson(
+                authorizedRequest(session, "/api/spudlink/v1/fitness/sync")
+                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
+                "Fitness sync",
+                35,
+            ),
+        )
+    }
+
+    suspend fun fetchPersonSettings(session: LittleSpudSession): PersonSettings = normalizePersonSettings(
+        executeJson(authorizedRequest(session, "/api/spudlink/v1/person").get().build(), "People", 25),
+    )
+
+    suspend fun saveLinkedPerson(session: LittleSpudSession, personId: String): PersonSettings {
+        val body = JSONObject().put("person_id", personId)
+        return normalizePersonSettings(
+            executeJson(
+                authorizedRequest(session, "/api/spudlink/v1/person")
+                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
+                "Person link",
+                25,
+            ),
+        )
+    }
+
+    suspend fun runFitnessChallenge(
+        session: LittleSpudSession,
+        action: String,
+        personId: String = "",
+        challengeId: String = "",
+        duration: String = "day",
+        metric: String = "steps",
+        value: Double? = null,
+    ): FitnessSnapshot {
+        val body = JSONObject().apply {
+            put("action", action); put("person_id", personId); put("challenge_id", challengeId)
+            put("duration", duration); put("metric", metric)
+            value?.let { put("value", it.coerceAtLeast(0.0)) }
+        }
+        return normalizeFitnessSnapshot(
+            executeJson(
+                authorizedRequest(session, "/api/spudlink/v1/fitness/challenges")
+                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
+                "Fitness challenge",
+                30,
+            ),
+        )
+    }
+
     suspend fun controlHome(
         session: LittleSpudSession,
         roomId: String,
@@ -336,6 +473,43 @@ class SpudLinkApi(
         )
     }
 
+    suspend fun reconcileAwarenessNotifications(
+        session: LittleSpudSession,
+        eventIds: List<String>,
+        legacyNotifications: List<Map<String, String>> = emptyList(),
+    ): Pair<Set<String>, Set<String>>? {
+        val cleanIds = eventIds.map(String::trim).filter(String::isNotBlank).distinct().sorted().take(200)
+        val cleanLegacy = legacyNotifications.take(200)
+        if (cleanIds.isEmpty() && cleanLegacy.isEmpty()) return emptySet<String>() to emptySet()
+        val body = JSONObject()
+            .put("event_ids", JSONArray().apply { cleanIds.forEach { put(it) } })
+            .put("notifications", JSONArray().apply {
+                cleanLegacy.forEach { item ->
+                    put(JSONObject().apply { item.forEach { (key, value) -> put(key, value) } })
+                }
+            })
+        val payload = executeJson(
+            authorizedRequest(session, "/api/spudlink/v1/notifications/reconcile")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
+            "Notification cleanup",
+            12,
+        )
+        if (!payload.optBoolean("authoritative", false)) return null
+        val active = payload.optJSONArray("active_event_ids") ?: JSONArray()
+        val activeIds = buildSet {
+            for (index in 0 until active.length()) {
+                active.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+        val missing = payload.optJSONArray("missing_notification_ids") ?: JSONArray()
+        val missingIds = buildSet {
+            for (index in 0 until missing.length()) {
+                missing.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+        return activeIds to missingIds
+    }
+
     suspend fun forgetPairing(session: LittleSpudSession) {
         if (session.isDemo) return
         var lastError: Throwable? = null
@@ -455,6 +629,30 @@ class SpudLinkApi(
     ): WebSocket = client.newWebSocket(
         Request.Builder()
             .url(sttStreamUrl(session, sampleRate, language))
+            .build(),
+        listener,
+    )
+
+    fun satChatMediaUrl(session: LittleSpudSession, sampleRate: Int): String {
+        val base = Uri.parse(hubApiUrl(session.hubUrl, "/api/spudlink/v1/sat-chat/media"))
+        val scheme = if (base.scheme.equals("https", true)) "wss" else "ws"
+        return base.buildUpon().scheme(scheme)
+            .appendQueryParameter("token", session.token)
+            .appendQueryParameter("rate", sampleRate.coerceIn(8_000, 48_000).toString())
+            .appendQueryParameter("bits", "16")
+            .appendQueryParameter("channels", "1")
+            .appendQueryParameter("user", session.userName)
+            .appendQueryParameter("device", session.deviceName)
+            .build().toString()
+    }
+
+    fun openSatChatMedia(
+        session: LittleSpudSession,
+        sampleRate: Int,
+        listener: WebSocketListener,
+    ): WebSocket = client.newWebSocket(
+        Request.Builder()
+            .url(satChatMediaUrl(session, sampleRate))
             .build(),
         listener,
     )
@@ -697,6 +895,31 @@ class SpudLinkApi(
         return HomeSnapshot(rooms, payload.dateMillis("generated_at", "generatedAt") ?: System.currentTimeMillis())
     }
 
+    private fun normalizeSatChatSnapshot(payload: JSONObject): SatChatSnapshot {
+        val participants = payload.objectArray("participants").mapNotNull { item ->
+            val id = item.string("id")
+            if (id.isBlank()) null else SatChatParticipant(
+                id = id,
+                name = item.string("name").ifBlank { item.string("room") }.ifBlank { "Satellite" },
+                room = item.string("room"),
+                board = item.string("board"),
+                audio = item.optBoolean("audio", true),
+                video = item.optBoolean("video", false),
+                busy = item.optBoolean("busy", false),
+            )
+        }
+        val callPayload = payload.objectOrNull("call")
+        val callId = callPayload?.string("id").orEmpty()
+        val call = if (callId.isBlank()) null else SatChatCall(
+            id = callId,
+            state = callPayload?.string("state").orEmpty(),
+            mode = callPayload?.string("mode").orEmpty().ifBlank { "audio" },
+            callerName = callPayload?.string("caller_name").orEmpty(),
+            targetName = callPayload?.string("target_name").orEmpty(),
+        )
+        return SatChatSnapshot(participants = participants, call = call)
+    }
+
     private fun normalizeMusicSnapshot(payload: JSONObject): MusicSnapshot {
         val provider = normalizeMusicProvider(payload.objectOrNull("provider"))
         val providers = payload.objectArray("providers").mapNotNull(::normalizeMusicProvider)
@@ -770,6 +993,101 @@ class SpudLinkApi(
         )
     }
 
+    private fun normalizePersonSettings(payload: JSONObject): PersonSettings = PersonSettings(
+        linkedPersonId = payload.string("linked_person_id"),
+        linkedPersonName = payload.string("linked_person_name"),
+        people = payload.objectArray("people").mapNotNull { row ->
+            val id = row.string("id")
+            if (id.isBlank()) null else PersonOption(id, row.string("name").ifBlank { "Person" })
+        },
+    )
+
+    private fun normalizeFitnessSnapshot(payload: JSONObject): FitnessSnapshot {
+        fun day(row: JSONObject?): FitnessDay? {
+            row ?: return null
+            val date = row.string("date"); if (date.isBlank()) return null
+            return FitnessDay(
+                date = date,
+                steps = row.doubleOrNull("steps")?.toInt(),
+                distanceMeters = row.doubleOrNull("distance_m"),
+                activeEnergyKcal = row.doubleOrNull("active_energy_kcal"),
+                exerciseMinutes = row.doubleOrNull("exercise_minutes"),
+                workouts = row.doubleOrNull("workouts")?.toInt(),
+                sleepMinutes = row.doubleOrNull("sleep_minutes"),
+                sleepCoreMinutes = row.doubleOrNull("sleep_core_minutes"),
+                sleepDeepMinutes = row.doubleOrNull("sleep_deep_minutes"),
+                sleepRemMinutes = row.doubleOrNull("sleep_rem_minutes"),
+                sleepAwakeMinutes = row.doubleOrNull("sleep_awake_minutes"),
+                heartRateAverage = row.doubleOrNull("heart_rate_avg_bpm"),
+                heartRateMinimum = row.doubleOrNull("heart_rate_min_bpm"),
+                heartRateMaximum = row.doubleOrNull("heart_rate_max_bpm"),
+                restingHeartRate = row.doubleOrNull("resting_heart_rate_bpm"),
+                heartRateVariability = row.doubleOrNull("heart_rate_variability_ms"),
+                bloodPressureSystolic = row.doubleOrNull("blood_pressure_systolic_mmhg"),
+                bloodPressureDiastolic = row.doubleOrNull("blood_pressure_diastolic_mmhg"),
+                oxygenSaturationPercent = row.doubleOrNull("oxygen_saturation_percent"),
+                respiratoryRate = row.doubleOrNull("respiratory_rate_per_min"),
+                weightKilograms = row.doubleOrNull("weight_kg"),
+                bodyFatPercent = row.doubleOrNull("body_fat_percent"),
+            )
+        }
+        fun person(row: JSONObject?): PersonOption? {
+            row ?: return null
+            val id = row.string("id")
+            return if (id.isBlank()) null else PersonOption(id, row.string("name").ifBlank { "Person" })
+        }
+        val summary = payload.objectOrNull("summary")
+        val privacy = payload.objectOrNull("privacy")
+        return FitnessSnapshot(
+            available = payload.booleanOrNull("available") ?: true,
+            configured = payload.booleanOrNull("configured") ?: false,
+            person = person(payload.objectOrNull("person")),
+            challengePeople = payload.objectArray("challenge_people").mapNotNull(::person),
+            today = day(payload.objectOrNull("today")),
+            recentDays = payload.objectArray("recent_days").mapNotNull(::day),
+            summaryHeadline = summary?.string("headline").orEmpty().ifBlank { "Your fitness" },
+            summaryDetail = summary?.string("detail").orEmpty(),
+            insights = summary?.objectArray("insights").orEmpty().mapNotNull { row ->
+                val id = row.string("id")
+                if (id.isBlank()) null else FitnessInsight(
+                    id = id,
+                    title = row.string("title").ifBlank { "Health" },
+                    headline = row.string("headline"),
+                    detail = row.string("detail"),
+                    recordedDate = row.string("recorded_date"),
+                )
+            },
+            challengeTypes = payload.objectArray("challenge_types").mapNotNull { row ->
+                val id = row.string("id")
+                if (id.isBlank()) null else FitnessChallengeType(
+                    id = id,
+                    title = row.string("title").ifBlank { id },
+                    unit = row.string("unit"),
+                    scoreKind = row.string("score_kind"),
+                    description = row.string("description"),
+                )
+            },
+            challenges = payload.objectArray("challenges").mapNotNull { row ->
+                val id = row.string("id"); if (id.isBlank()) return@mapNotNull null
+                FitnessChallenge(
+                    id = id, state = row.string("state"), duration = row.string("duration"),
+                    opponentId = row.string("opponent_id"),
+                    opponentName = row.string("opponent_name").ifBlank { "Little Spud user" },
+                    metric = row.string("metric").ifBlank { "steps" },
+                    metricTitle = row.string("metric_title").ifBlank { "Steps" },
+                    unit = row.string("unit").ifBlank { "steps" },
+                    scoreKind = row.string("score_kind").ifBlank { "highest_total" },
+                    myScore = row.doubleOrNull("my_score") ?: 0.0,
+                    theirScore = row.doubleOrNull("their_score") ?: 0.0,
+                    startAt = row.dateMillis("start_at"), endAt = row.dateMillis("end_at"),
+                    incoming = row.booleanOrNull("incoming") ?: false, result = row.string("result"),
+                )
+            },
+            lastSyncAt = payload.dateMillis("last_sync_at"),
+            privacyMessage = privacy?.string("message").orEmpty().ifBlank { "Daily totals only; raw health samples stay on this phone." },
+        )
+    }
+
     private fun normalizeMusicProvider(item: JSONObject?): MusicProvider? {
         item ?: return null
         val id = item.string("id"); if (id.isBlank()) return null
@@ -809,11 +1127,14 @@ class SpudLinkApi(
         val title = item.string("title"); val message = item.string("message", "content")
         if (title.isBlank() && message.isBlank()) return null
         val attachments = normalizeAssistantArtifacts(item.optJSONArray("attachments")?.objects().orEmpty(), session)
+        val origin = item.objectOrNull("origin")
         return HubNotification(
             item.string("id").ifBlank { UUID.randomUUID().toString() }, title, message,
             item.dateMillis("createdAt", "created_at", "ts") ?: System.currentTimeMillis(),
             item.string("priority").ifBlank { item.objectOrNull("meta")?.string("priority").orEmpty() }.ifBlank { "normal" },
             attachments,
+            origin?.string("source", "platform").orEmpty(),
+            origin?.string("event_id", "eventId").orEmpty(),
         )
     }
 
@@ -830,6 +1151,7 @@ class SpudLinkApi(
             LittleSpudAttachment(
                 item.string("id", "file_id").ifBlank { UUID.randomUUID().toString() }, name, type,
                 item.intValue("size"), preview, data,
+                item.dateMillis("expiresAt", "expires_at"),
             )
         }
 

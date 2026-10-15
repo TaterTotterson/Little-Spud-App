@@ -22,7 +22,30 @@ enum class ConnectionRoute(val wireName: String) {
     }
 }
 
-enum class LittleSpudLane { NOTIFICATIONS, CHAT, HOME, MUSIC }
+enum class LittleSpudLane { NOTIFICATIONS, CHAT, HOME, MUSIC, SAT_CHAT, CAMERAS, FITNESS }
+
+data class SatChatParticipant(
+    val id: String,
+    val name: String,
+    val room: String = "",
+    val board: String = "",
+    val audio: Boolean = true,
+    val video: Boolean = false,
+    val busy: Boolean = false,
+)
+
+data class SatChatCall(
+    val id: String,
+    val state: String,
+    val mode: String = "audio",
+    val callerName: String = "",
+    val targetName: String = "",
+)
+
+data class SatChatSnapshot(
+    val participants: List<SatChatParticipant> = emptyList(),
+    val call: SatChatCall? = null,
+)
 
 enum class TemperatureUnitPreference(
     val storageValue: String,
@@ -129,12 +152,14 @@ data class LittleSpudAttachment(
     val size: Int,
     val previewUrl: String = "",
     val dataUrl: String = "",
+    val expiresAt: Long? = null,
 ) {
     val displayName: String get() = name.trim().ifBlank { "attachment" }
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("type", type); put("size", size)
         put("previewUrl", previewUrl); put("dataUrl", dataUrl)
+        put("expiresAt", expiresAt ?: JSONObject.NULL)
     }
 
     companion object {
@@ -145,6 +170,7 @@ data class LittleSpudAttachment(
             size = json.intValue("size"),
             previewUrl = json.string("previewUrl", "preview_url", "url"),
             dataUrl = json.string("dataUrl", "data_url"),
+            expiresAt = json.dateMillis("expiresAt", "expires_at"),
         )
     }
 }
@@ -159,12 +185,30 @@ data class LittleSpudMessage(
     val notificationTitle: String? = null,
     val notificationBody: String? = null,
     val notificationPriority: String? = null,
+    val notificationSource: String? = null,
+    val notificationSourceEventId: String? = null,
 ) {
     val notificationDisplayBody: String
         get() = notificationBodyParts().first
 
     val notificationFaceIdSummary: String?
         get() = notificationBodyParts().second.ifBlank { null }
+
+    val awarenessEventId: String?
+        get() {
+            val explicitId = notificationSourceEventId.orEmpty().trim()
+            if (notificationSource.orEmpty().trim().equals("awareness_core", ignoreCase = true) && explicitId.isNotBlank()) {
+                return explicitId
+            }
+            return attachments.firstNotNullOfOrNull { attachment ->
+                val name = attachment.name.trim()
+                if (!name.startsWith("awareness-", ignoreCase = true)) return@firstNotNullOfOrNull null
+                val candidate = name.substringBeforeLast('.').drop("awareness-".length)
+                candidate.takeIf {
+                    it.length >= 8 && !it.equals("camera", ignoreCase = true) && !it.equals("doorbell", ignoreCase = true)
+                }
+            }
+        }
 
     private fun notificationBodyParts(): Pair<String, String> {
         val explicitBody = notificationBody.orEmpty().trim()
@@ -193,6 +237,8 @@ data class LittleSpudMessage(
         put("notificationTitle", notificationTitle ?: JSONObject.NULL)
         put("notificationBody", notificationBody ?: JSONObject.NULL)
         put("notificationPriority", notificationPriority ?: JSONObject.NULL)
+        put("notificationSource", notificationSource ?: JSONObject.NULL)
+        put("notificationSourceEventId", notificationSourceEventId ?: JSONObject.NULL)
     }
 
     companion object {
@@ -208,6 +254,8 @@ data class LittleSpudMessage(
                 notificationTitle = json.nullableString("notificationTitle"),
                 notificationBody = json.nullableString("notificationBody"),
                 notificationPriority = json.nullableString("notificationPriority"),
+                notificationSource = json.nullableString("notificationSource"),
+                notificationSourceEventId = json.nullableString("notificationSourceEventId"),
             )
         }
     }
@@ -253,6 +301,8 @@ data class HubNotification(
     val createdAt: Long,
     val priority: String,
     val attachments: List<LittleSpudAttachment> = emptyList(),
+    val source: String = "",
+    val sourceEventId: String = "",
 ) {
     val content: String get() = when {
         title.isNotBlank() && message.isNotBlank() -> "$title\n\n$message"
@@ -393,6 +443,92 @@ data class MusicSnapshot(
     val targets: List<MusicTarget> = emptyList(),
     val player: MusicPlayerState = MusicPlayerState(),
     val syncedAt: Long? = null,
+)
+
+data class FitnessDay(
+    val date: String,
+    val steps: Int? = null,
+    val distanceMeters: Double? = null,
+    val activeEnergyKcal: Double? = null,
+    val exerciseMinutes: Double? = null,
+    val workouts: Int? = null,
+    val sleepMinutes: Double? = null,
+    val sleepCoreMinutes: Double? = null,
+    val sleepDeepMinutes: Double? = null,
+    val sleepRemMinutes: Double? = null,
+    val sleepAwakeMinutes: Double? = null,
+    val heartRateAverage: Double? = null,
+    val heartRateMinimum: Double? = null,
+    val heartRateMaximum: Double? = null,
+    val restingHeartRate: Double? = null,
+    val heartRateVariability: Double? = null,
+    val bloodPressureSystolic: Double? = null,
+    val bloodPressureDiastolic: Double? = null,
+    val oxygenSaturationPercent: Double? = null,
+    val respiratoryRate: Double? = null,
+    val weightKilograms: Double? = null,
+    val bodyFatPercent: Double? = null,
+)
+
+data class FitnessInsight(
+    val id: String,
+    val title: String,
+    val headline: String,
+    val detail: String,
+    val recordedDate: String,
+)
+
+data class FitnessChallengeType(
+    val id: String,
+    val title: String,
+    val unit: String,
+    val scoreKind: String,
+    val description: String,
+)
+
+data class PersonOption(
+    val id: String,
+    val name: String,
+)
+
+data class PersonSettings(
+    val linkedPersonId: String = "",
+    val linkedPersonName: String = "",
+    val people: List<PersonOption> = emptyList(),
+)
+
+data class FitnessChallenge(
+    val id: String,
+    val state: String,
+    val duration: String,
+    val opponentId: String,
+    val opponentName: String,
+    val metric: String,
+    val metricTitle: String,
+    val unit: String,
+    val scoreKind: String,
+    val myScore: Double,
+    val theirScore: Double,
+    val startAt: Long? = null,
+    val endAt: Long? = null,
+    val incoming: Boolean = false,
+    val result: String = "",
+)
+
+data class FitnessSnapshot(
+    val available: Boolean = false,
+    val configured: Boolean = false,
+    val person: PersonOption? = null,
+    val challengePeople: List<PersonOption> = emptyList(),
+    val today: FitnessDay? = null,
+    val recentDays: List<FitnessDay> = emptyList(),
+    val summaryHeadline: String = "Fitness Core",
+    val summaryDetail: String = "Install and start Fitness Core in Tater to use private health sync.",
+    val insights: List<FitnessInsight> = emptyList(),
+    val challengeTypes: List<FitnessChallengeType> = emptyList(),
+    val challenges: List<FitnessChallenge> = emptyList(),
+    val lastSyncAt: Long? = null,
+    val privacyMessage: String = "Daily totals only; raw health samples stay on this phone.",
 )
 
 data class PushRegistration(

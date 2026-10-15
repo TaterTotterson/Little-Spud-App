@@ -262,6 +262,125 @@ final class SpudLinkAPI {
         return normalizeHomeSnapshot(payload)
     }
 
+    func fetchSatChat(session: LittleSpudSession) async throws -> LittleSpudSatChatSnapshot {
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/sat-chat")
+        request.timeoutInterval = 12
+        return normalizeSatChatSnapshot(try await fetchDictionary(request, actionLabel: "Sat Chat sync"))
+    }
+
+    func controlSatChat(
+        session: LittleSpudSession,
+        action: String,
+        target: String = "",
+        callID: String = "",
+        mode: String = "audio"
+    ) async throws -> LittleSpudSatChatSnapshot {
+        var body: [String: Any] = ["action": action]
+        if !target.isEmpty { body["target"] = target }
+        if !callID.isEmpty { body["call_id"] = callID }
+        body["mode"] = mode.lowercased() == "video" ? "video" : "audio"
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/sat-chat")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = try jsonData(body)
+        _ = try await fetchDictionary(request, actionLabel: "Sat Chat")
+        return try await fetchSatChat(session: session)
+    }
+
+    func fetchPersonSettings(session: LittleSpudSession) async throws -> LittleSpudPersonSettings {
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/person")
+        request.timeoutInterval = 20
+        return normalizePersonSettings(try await fetchDictionary(request, actionLabel: "People"))
+    }
+
+    func saveLinkedPerson(session: LittleSpudSession, personID: String) async throws -> LittleSpudPersonSettings {
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/person")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = try jsonData(["person_id": personID])
+        return normalizePersonSettings(try await fetchDictionary(request, actionLabel: "Person link"))
+    }
+
+    func fetchFitness(session: LittleSpudSession, refresh: Bool = false) async throws -> LittleSpudFitnessSnapshot {
+        var request = try authorizedRequest(
+            session: session,
+            path: "/api/spudlink/v1/fitness?refresh=\(refresh ? "true" : "false")"
+        )
+        request.timeoutInterval = 20
+        return normalizeFitnessSnapshot(try await fetchDictionary(request, actionLabel: "Fitness"))
+    }
+
+    func syncFitness(
+        session: LittleSpudSession,
+        platform: String,
+        timeZone: String,
+        permissions: [String],
+        days: [LittleSpudFitnessDay]
+    ) async throws -> LittleSpudFitnessSnapshot {
+        let dayPayload: [[String: Any]] = days.map { day in
+            var row: [String: Any] = ["date": day.date]
+            func put(_ key: String, _ value: Any?) {
+                if let value { row[key] = value }
+            }
+            put("steps", day.steps)
+            put("distance_m", day.distanceMeters)
+            put("active_energy_kcal", day.activeEnergyKcal)
+            put("exercise_minutes", day.exerciseMinutes)
+            put("workouts", day.workouts)
+            put("sleep_minutes", day.sleepMinutes)
+            put("sleep_core_minutes", day.sleepCoreMinutes)
+            put("sleep_deep_minutes", day.sleepDeepMinutes)
+            put("sleep_rem_minutes", day.sleepREMMinutes)
+            put("sleep_awake_minutes", day.sleepAwakeMinutes)
+            put("heart_rate_avg_bpm", day.heartRateAverage)
+            put("heart_rate_min_bpm", day.heartRateMinimum)
+            put("heart_rate_max_bpm", day.heartRateMaximum)
+            put("resting_heart_rate_bpm", day.restingHeartRate)
+            put("heart_rate_variability_ms", day.heartRateVariability)
+            put("blood_pressure_systolic_mmhg", day.bloodPressureSystolic)
+            put("blood_pressure_diastolic_mmhg", day.bloodPressureDiastolic)
+            put("oxygen_saturation_percent", day.oxygenSaturationPercent)
+            put("respiratory_rate_per_min", day.respiratoryRate)
+            put("weight_kg", day.weightKilograms)
+            put("body_fat_percent", day.bodyFatPercent)
+            return row
+        }
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/fitness/sync")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.httpBody = try jsonData([
+            "platform": platform,
+            "time_zone": timeZone,
+            "permissions": permissions,
+            "days": dayPayload,
+        ])
+        return normalizeFitnessSnapshot(try await fetchDictionary(request, actionLabel: "Fitness sync"))
+    }
+
+    func runFitnessChallenge(
+        session: LittleSpudSession,
+        action: String,
+        personID: String = "",
+        challengeID: String = "",
+        duration: String = "day",
+        metric: String = "steps",
+        value: Double? = nil
+    ) async throws -> LittleSpudFitnessSnapshot {
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/fitness/challenges")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 25
+        var payload: [String: Any] = [
+            "action": action,
+            "person_id": personID,
+            "challenge_id": challengeID,
+            "duration": duration,
+            "metric": metric,
+        ]
+        if let value { payload["value"] = max(0, value) }
+        request.httpBody = try jsonData(payload)
+        return normalizeFitnessSnapshot(try await fetchDictionary(request, actionLabel: "Fitness challenge"))
+    }
+
     func fetchHomeCameraSnapshot(
         session: LittleSpudSession,
         roomID: String,
@@ -503,6 +622,31 @@ final class SpudLinkAPI {
         _ = try await fetchDictionary(request, actionLabel: "Notification ack")
     }
 
+    func reconcileAwarenessNotifications(
+        session: LittleSpudSession,
+        eventIDs: [String],
+        legacyNotifications: [[String: String]] = []
+    ) async throws -> (activeEventIDs: Set<String>, missingNotificationIDs: Set<String>)? {
+        let cleanIDs = Array(Set(eventIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
+            .sorted()
+            .prefix(200)
+        let cleanLegacy = Array(legacyNotifications.prefix(200))
+        guard !cleanIDs.isEmpty || !cleanLegacy.isEmpty else { return ([], []) }
+        var request = try authorizedRequest(session: session, path: "/api/spudlink/v1/notifications/reconcile")
+        request.httpMethod = "POST"
+        request.httpBody = try jsonData([
+            "event_ids": Array(cleanIDs),
+            "notifications": cleanLegacy,
+        ])
+        request.timeoutInterval = 12
+        let payload = try await fetchDictionary(request, actionLabel: "Notification cleanup")
+        guard (payload["authoritative"] as? Bool) == true else { return nil }
+        return (
+            Set((payload["active_event_ids"] as? [String]) ?? []),
+            Set((payload["missing_notification_ids"] as? [String]) ?? [])
+        )
+    }
+
     func forgetPairing(session: LittleSpudSession) async throws {
         if session.isDemo {
             return
@@ -623,6 +767,22 @@ final class SpudLinkAPI {
         ]
         guard let streamURL = components?.url else {
             throw SpudLinkAPIError.message("Voice input URL is not valid.")
+        }
+        return streamURL
+    }
+
+    func satChatMediaURL(session: LittleSpudSession, sampleRate: Int) throws -> URL {
+        let httpURL = try url(hubAPIURL(session.hubUrl, "/api/spudlink/v1/sat-chat/media"), label: "Sat Chat media URL")
+        var components = URLComponents(url: httpURL, resolvingAgainstBaseURL: false)
+        components?.scheme = httpURL.scheme?.lowercased() == "https" ? "wss" : "ws"
+        components?.queryItems = [
+            URLQueryItem(name: "token", value: session.token),
+            URLQueryItem(name: "rate", value: String(max(8_000, min(48_000, sampleRate)))),
+            URLQueryItem(name: "bits", value: "16"),
+            URLQueryItem(name: "channels", value: "1"),
+        ]
+        guard let streamURL = components?.url else {
+            throw SpudLinkAPIError.message("Sat Chat media URL is not valid.")
         }
         return streamURL
     }
@@ -1043,6 +1203,144 @@ final class SpudLinkAPI {
         )
     }
 
+    private func normalizePersonSettings(_ payload: [String: Any]) -> LittleSpudPersonSettings {
+        let people = (payload["people"] as? [[String: Any]] ?? []).compactMap { row -> LittleSpudPersonOption? in
+            let id = dictString(row, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudPersonOption(id: id, name: dictString(row, "name").ifEmpty("Person"))
+        }
+        return LittleSpudPersonSettings(
+            linkedPersonID: dictString(payload, "linked_person_id"),
+            linkedPersonName: dictString(payload, "linked_person_name"),
+            people: people
+        )
+    }
+
+    private func normalizeFitnessSnapshot(_ payload: [String: Any]) -> LittleSpudFitnessSnapshot {
+        func fitnessDay(_ row: [String: Any]?) -> LittleSpudFitnessDay? {
+            guard let row else { return nil }
+            let day = dictString(row, "date")
+            guard !day.isEmpty else { return nil }
+            return LittleSpudFitnessDay(
+                date: day,
+                steps: doubleValue(row["steps"]).map { Int($0.rounded()) },
+                distanceMeters: doubleValue(row["distance_m"]),
+                activeEnergyKcal: doubleValue(row["active_energy_kcal"]),
+                exerciseMinutes: doubleValue(row["exercise_minutes"]),
+                workouts: doubleValue(row["workouts"]).map { Int($0.rounded()) },
+                sleepMinutes: doubleValue(row["sleep_minutes"]),
+                sleepCoreMinutes: doubleValue(row["sleep_core_minutes"]),
+                sleepDeepMinutes: doubleValue(row["sleep_deep_minutes"]),
+                sleepREMMinutes: doubleValue(row["sleep_rem_minutes"]),
+                sleepAwakeMinutes: doubleValue(row["sleep_awake_minutes"]),
+                heartRateAverage: doubleValue(row["heart_rate_avg_bpm"]),
+                heartRateMinimum: doubleValue(row["heart_rate_min_bpm"]),
+                heartRateMaximum: doubleValue(row["heart_rate_max_bpm"]),
+                restingHeartRate: doubleValue(row["resting_heart_rate_bpm"]),
+                heartRateVariability: doubleValue(row["heart_rate_variability_ms"]),
+                bloodPressureSystolic: doubleValue(row["blood_pressure_systolic_mmhg"]),
+                bloodPressureDiastolic: doubleValue(row["blood_pressure_diastolic_mmhg"]),
+                oxygenSaturationPercent: doubleValue(row["oxygen_saturation_percent"]),
+                respiratoryRate: doubleValue(row["respiratory_rate_per_min"]),
+                weightKilograms: doubleValue(row["weight_kg"]),
+                bodyFatPercent: doubleValue(row["body_fat_percent"])
+            )
+        }
+        func person(_ row: [String: Any]?) -> LittleSpudPersonOption? {
+            guard let row else { return nil }
+            let id = dictString(row, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudPersonOption(id: id, name: dictString(row, "name").ifEmpty("Person"))
+        }
+        let challenges = (payload["challenges"] as? [[String: Any]] ?? []).compactMap { row -> LittleSpudFitnessChallenge? in
+            let id = dictString(row, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudFitnessChallenge(
+                id: id,
+                state: dictString(row, "state"),
+                duration: dictString(row, "duration"),
+                opponentID: dictString(row, "opponent_id"),
+                opponentName: dictString(row, "opponent_name").ifEmpty("Little Spud user"),
+                metric: dictString(row, "metric").ifEmpty("steps"),
+                metricTitle: dictString(row, "metric_title").ifEmpty("Steps"),
+                unit: dictString(row, "unit").ifEmpty("steps"),
+                scoreKind: dictString(row, "score_kind").ifEmpty("highest_total"),
+                myScore: doubleValue(row["my_score"]) ?? 0,
+                theirScore: doubleValue(row["their_score"]) ?? 0,
+                startAt: dateValue(row, keys: ["start_at"]),
+                endAt: dateValue(row, keys: ["end_at"]),
+                incoming: dictBool(row, "incoming") ?? false,
+                result: dictString(row, "result")
+            )
+        }
+        let summary = dict(payload["summary"])
+        let privacy = dict(payload["privacy"])
+        let insights = (summary?["insights"] as? [[String: Any]] ?? []).compactMap { row -> LittleSpudFitnessInsight? in
+            let id = dictString(row, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudFitnessInsight(
+                id: id,
+                title: dictString(row, "title").ifEmpty("Health"),
+                headline: dictString(row, "headline"),
+                detail: dictString(row, "detail"),
+                recordedDate: dictString(row, "recorded_date")
+            )
+        }
+        let challengeTypes = (payload["challenge_types"] as? [[String: Any]] ?? []).compactMap {
+            row -> LittleSpudFitnessChallengeType? in
+            let id = dictString(row, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudFitnessChallengeType(
+                id: id,
+                title: dictString(row, "title").ifEmpty(id),
+                unit: dictString(row, "unit"),
+                scoreKind: dictString(row, "score_kind"),
+                description: dictString(row, "description")
+            )
+        }
+        return LittleSpudFitnessSnapshot(
+            available: dictBool(payload, "available") ?? true,
+            configured: dictBool(payload, "configured") ?? false,
+            person: person(dict(payload["person"])),
+            challengePeople: (payload["challenge_people"] as? [[String: Any]] ?? []).compactMap(person),
+            today: fitnessDay(dict(payload["today"])),
+            recentDays: (payload["recent_days"] as? [[String: Any]] ?? []).compactMap(fitnessDay),
+            summaryHeadline: dictString(summary, "headline").ifEmpty("Your fitness"),
+            summaryDetail: dictString(summary, "detail"),
+            insights: insights,
+            challengeTypes: challengeTypes,
+            challenges: challenges,
+            lastSyncAt: dateValue(payload, keys: ["last_sync_at"]),
+            privacyMessage: dictString(privacy, "message").ifEmpty("Daily totals only; raw health samples stay on this phone.")
+        )
+    }
+
+    private func normalizeSatChatSnapshot(_ payload: [String: Any]) -> LittleSpudSatChatSnapshot {
+        let participants = ((payload["participants"] as? [[String: Any]]) ?? []).compactMap { item -> LittleSpudSatChatParticipant? in
+            let id = dictString(item, "id")
+            guard !id.isEmpty else { return nil }
+            return LittleSpudSatChatParticipant(
+                id: id,
+                name: dictString(item, "name").ifEmpty(dictString(item, "room")).ifEmpty("Satellite"),
+                room: dictString(item, "room"),
+                board: dictString(item, "board"),
+                audio: dictBool(item, "audio") ?? true,
+                video: dictBool(item, "video") ?? false,
+                busy: dictBool(item, "busy") ?? false
+            )
+        }
+        let callPayload = payload["call"] as? [String: Any]
+        let callID = dictString(callPayload, "id")
+        let call = callID.isEmpty ? nil : LittleSpudSatChatCall(
+            id: callID,
+            state: dictString(callPayload, "state"),
+            mode: dictString(callPayload, "mode").ifEmpty("audio"),
+            callerName: dictString(callPayload, "caller_name"),
+            targetName: dictString(callPayload, "target_name")
+        )
+        return LittleSpudSatChatSnapshot(participants: participants, call: call)
+    }
+
     private func normalizeMusicSnapshot(
         _ payload: [String: Any]
     ) -> LittleSpudMusicSnapshot {
@@ -1248,13 +1546,16 @@ final class SpudLinkAPI {
         let message = dictString(item, "message", "content")
         guard !title.isEmpty || !message.isEmpty else { return nil }
         let rawAttachments = (item["attachments"] as? [[String: Any]]) ?? []
+        let origin = dict(item["origin"])
         return HubNotification(
             id: dictString(item, "id").ifEmpty(UUID().uuidString),
             title: title,
             message: message,
             createdAt: dateValue(item, keys: ["createdAt", "created_at", "ts"]).ifNil(Date()),
             priority: dictString(item, "priority").ifEmpty(dictString(dict(item["meta"]), "priority").ifEmpty("normal")),
-            attachments: normalizeAssistantArtifacts(rawAttachments, session: session)
+            attachments: normalizeAssistantArtifacts(rawAttachments, session: session),
+            source: dictString(origin, "source", "platform"),
+            sourceEventID: dictString(origin, "event_id", "eventId")
         )
     }
 
@@ -1279,7 +1580,8 @@ final class SpudLinkAPI {
                 type: type,
                 size: intValue(item["size"]),
                 previewUrl: previewURL,
-                dataUrl: dataURL
+                dataUrl: dataURL,
+                expiresAt: dateValue(item, keys: ["expiresAt", "expires_at"])
             )
         }
     }

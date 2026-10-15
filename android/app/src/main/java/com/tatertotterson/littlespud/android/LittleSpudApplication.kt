@@ -7,6 +7,8 @@ import com.tatertotterson.littlespud.android.data.SettingsStore
 import com.tatertotterson.littlespud.android.data.SpudLinkApi
 import com.tatertotterson.littlespud.android.push.NotificationHelper
 import com.tatertotterson.littlespud.android.push.NotificationUpdates
+import com.tatertotterson.littlespud.android.fitness.FitnessSyncWorker
+import com.tatertotterson.littlespud.android.fitness.HealthConnectFitnessStore
 
 class LittleSpudApplication : Application() {
     lateinit var container: AppContainer
@@ -16,6 +18,15 @@ class LittleSpudApplication : Application() {
         super.onCreate()
         container = AppContainer(this)
         container.notifications.createChannel()
+        val session = container.secureStore.loadSession()
+        if (container.settings.fitnessSyncEnabled &&
+            session != null &&
+            container.fitnessHealth.coreAvailable(session)
+        ) {
+            FitnessSyncWorker.schedule(this)
+        } else {
+            FitnessSyncWorker.cancel(this)
+        }
     }
 }
 
@@ -26,4 +37,5 @@ class AppContainer(application: Application) {
     val api = SpudLinkApi(secureStore)
     val notifications = NotificationHelper(application)
     val notificationUpdates = NotificationUpdates()
+    val fitnessHealth = HealthConnectFitnessStore(application)
 }

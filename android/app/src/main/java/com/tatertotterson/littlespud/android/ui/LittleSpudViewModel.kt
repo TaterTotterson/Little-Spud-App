@@ -7,8 +7,13 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -16,7 +21,13 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Size
+import android.util.Log
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -35,6 +46,7 @@ import com.tatertotterson.littlespud.android.BuildConfig
 import com.tatertotterson.littlespud.android.data.ChatResponse
 import com.tatertotterson.littlespud.android.data.SpudLinkException
 import com.tatertotterson.littlespud.android.model.ConnectionRoute
+import com.tatertotterson.littlespud.android.model.FitnessSnapshot
 import com.tatertotterson.littlespud.android.model.HomeCategory
 import com.tatertotterson.littlespud.android.model.HomeSnapshot
 import com.tatertotterson.littlespud.android.model.HubActiveRun
@@ -45,14 +57,18 @@ import com.tatertotterson.littlespud.android.model.LittleSpudLane
 import com.tatertotterson.littlespud.android.model.LittleSpudMessage
 import com.tatertotterson.littlespud.android.model.LittleSpudRole
 import com.tatertotterson.littlespud.android.model.LittleSpudSession
+import com.tatertotterson.littlespud.android.model.SatChatParticipant
+import com.tatertotterson.littlespud.android.model.SatChatSnapshot
 import com.tatertotterson.littlespud.android.model.MusicRecommendation
 import com.tatertotterson.littlespud.android.model.MusicSnapshot
 import com.tatertotterson.littlespud.android.model.MusicTrack
 import com.tatertotterson.littlespud.android.model.PushRegistration
+import com.tatertotterson.littlespud.android.model.PersonSettings
 import com.tatertotterson.littlespud.android.model.TemperatureUnitPreference
 import com.tatertotterson.littlespud.android.playback.MusicPlaybackService
 import com.tatertotterson.littlespud.android.playback.toMusicTrack
 import com.tatertotterson.littlespud.android.playback.toPlaybackMediaItem
+import com.tatertotterson.littlespud.android.fitness.FitnessSyncWorker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -76,6 +92,8 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
+import java.time.ZoneId
+import java.util.concurrent.Executors
 import kotlin.math.max
 
 data class LittleSpudUiState(
@@ -114,6 +132,19 @@ data class LittleSpudUiState(
     val musicTransportLoading: Boolean = false,
     val musicError: String = "",
     val musicQuery: String = "",
+    val fitness: FitnessSnapshot = FitnessSnapshot(),
+    val fitnessLoading: Boolean = false,
+    val fitnessError: String = "",
+    val fitnessCoreAvailable: Boolean = false,
+    val fitnessHealthAvailable: Boolean = false,
+    val fitnessHealthConnected: Boolean = false,
+    val personSettings: PersonSettings = PersonSettings(),
+    val personLinkLoading: Boolean = false,
+    val personLinkError: String = "",
+    val satChat: SatChatSnapshot = SatChatSnapshot(),
+    val satChatLoading: Boolean = false,
+    val satChatError: String = "",
+    val satChatRemoteVideoFrame: ByteArray? = null,
     val selectedMusicTargetIds: Set<String> = emptySet(),
     val localMusicTrack: MusicTrack? = null,
     val localMusicQueue: List<MusicTrack> = emptyList(),
@@ -149,6 +180,9 @@ class LittleSpudViewModel(
             notificationUnreadCount = container.settings.notificationUnreadCount,
             ttsEnabled = container.settings.ttsEnabled,
             temperatureUnitPreference = container.settings.temperatureUnitPreference,
+            fitnessCoreAvailable = container.secureStore.loadSession()?.let(container.fitnessHealth::coreAvailable) ?: false,
+            fitnessHealthAvailable = container.fitnessHealth.isAvailable,
+            fitnessHealthConnected = container.settings.fitnessSyncEnabled,
         ),
     )
     val state: StateFlow<LittleSpudUiState> = _state.asStateFlow()
@@ -157,13 +191,24 @@ class LittleSpudViewModel(
     private var routeProbeJob: Job? = null
     private var homeJob: Job? = null
     private var musicJob: Job? = null
+    private var fitnessStateSyncJob: Job? = null
     private var musicStateSyncJob: Job? = null
     private var pushJob: Job? = null
     private var voiceCaptureJob: Job? = null
     private var voiceSocket: WebSocket? = null
     private var pendingReopenMicJob: Job? = null
     private var audioRecord: AudioRecord? = null
+    private var satChatCaptureJob: Job? = null
+    private var satChatSocket: WebSocket? = null
+    private var satChatRecorder: AudioRecord? = null
+    private var satChatTrack: AudioTrack? = null
+    private var satChatFocusRequest: AudioFocusRequest? = null
+    private var satChatCameraProvider: ProcessCameraProvider? = null
+    private var satChatCameraAnalysis: ImageAnalysis? = null
+    private val satChatCameraExecutor = Executors.newSingleThreadExecutor()
+    private var satChatLastCameraFrameAt = 0L
     private val pendingNotificationAcks = mutableSetOf<String>()
+    private var lastNotificationReconcileAt = 0L
     private var localMusicController: MediaController? = null
     private var localMusicControllerFuture: ListenableFuture<MediaController>? = null
     private var pendingLocalPlayback: ((MediaController) -> Unit)? = null
@@ -290,7 +335,10 @@ class LittleSpudViewModel(
     fun updateSyncCode(value: String) = _state.update { it.copy(syncCode = value) }
     fun updateDraft(value: String) = _state.update { it.copy(draft = value) }
     fun updateMusicQuery(value: String) = _state.update { it.copy(musicQuery = value) }
-    fun showSettings(show: Boolean) = _state.update { it.copy(showSettings = show) }
+    fun showSettings(show: Boolean) {
+        _state.update { it.copy(showSettings = show) }
+        if (show) refreshPersonSettings()
+    }
     fun setTemperatureUnitPreference(preference: TemperatureUnitPreference) {
         container.settings.temperatureUnitPreference = preference
         _state.update { it.copy(temperatureUnitPreference = preference) }
@@ -556,6 +604,16 @@ class LittleSpudViewModel(
         if (_state.value.activeLane == LittleSpudLane.MUSIC) {
             refreshMusic()
             startMusicStateSync()
+        } else if (_state.value.activeLane == LittleSpudLane.CAMERAS) {
+            refreshHome()
+        } else if (_state.value.activeLane == LittleSpudLane.FITNESS) {
+            refreshFitness(syncHealth = true)
+        }
+        if (container.settings.fitnessSyncEnabled &&
+            _state.value.activeLane != LittleSpudLane.FITNESS &&
+            container.fitnessHealth.coreAvailable(session)
+        ) {
+            syncFitnessFromHealth()
         }
         syncPushRegistration()
     }
@@ -567,12 +625,19 @@ class LittleSpudViewModel(
         routeProbeJob?.cancel()
         routeProbeJob = null
         stopMusicStateSync()
+        fitnessStateSyncJob?.cancel()
+        fitnessStateSyncJob = null
         if (_state.value.isVoiceRecording || _state.value.isVoiceSubmitting) cancelVoiceInput()
+        if (satChatSocket != null) stopSatChatMedia(closeSocket = true)
     }
 
     fun selectLane(lane: LittleSpudLane) {
         _state.update { it.copy(activeLane = lane, showSettings = false) }
         if (lane != LittleSpudLane.MUSIC) stopMusicStateSync()
+        if (lane != LittleSpudLane.FITNESS) {
+            fitnessStateSyncJob?.cancel()
+            fitnessStateSyncJob = null
+        }
         when (lane) {
             LittleSpudLane.NOTIFICATIONS -> markNotificationsRead()
             LittleSpudLane.HOME -> refreshHome()
@@ -580,8 +645,630 @@ class LittleSpudViewModel(
                 refreshMusic()
                 startMusicStateSync()
             }
+            LittleSpudLane.SAT_CHAT -> refreshSatChat()
+            LittleSpudLane.CAMERAS -> refreshHome()
+            LittleSpudLane.FITNESS -> {
+                refreshFitness(syncHealth = true)
+            }
             LittleSpudLane.CHAT -> Unit
         }
+    }
+
+    fun fitnessPermissions(): Set<String> = container.fitnessHealth.requiredPermissions
+
+    fun finishFitnessPermissionRequest(granted: Set<String>) {
+        viewModelScope.launch {
+            val effectivePermissions = granted + runCatching {
+                container.fitnessHealth.grantedPermissions()
+            }.getOrDefault(emptySet())
+            val connected = container.fitnessHealth.hasReadAccess(effectivePermissions)
+            container.settings.fitnessSyncEnabled = connected
+            _state.update {
+                it.copy(
+                    fitnessHealthConnected = connected,
+                    fitnessError = "",
+                )
+            }
+            if (connected) {
+                syncFitnessFromHealth(showStatus = true)
+            } else {
+                refreshFitness(syncHealth = false)
+                _state.update {
+                    it.copy(
+                        fitnessError = "Health Connect access was not granted. Tap Connect Health Connect to try again.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun refreshFitness(syncHealth: Boolean = false) {
+        val session = _state.value.session ?: return
+        if (session.isDemo) {
+            _state.update { it.copy(fitnessError = "Pair with Tater and install Fitness Core to use health sync.") }
+            return
+        }
+        if (syncHealth && _state.value.fitnessHealthConnected) {
+            syncFitnessFromHealth()
+            return
+        }
+        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
+        viewModelScope.launch {
+            runCatching { container.api.fetchFitness(session, refresh = true) }
+                .onSuccess { snapshot ->
+                    container.fitnessHealth.setCoreAvailable(true, session)
+                    _state.update {
+                        it.copy(fitness = snapshot, fitnessLoading = false, fitnessCoreAvailable = true)
+                    }
+                    if (_state.value.activeLane == LittleSpudLane.FITNESS) startFitnessStateSync()
+                }
+                .onFailure { error ->
+                    if (isFitnessCoreUnavailable(error)) {
+                        container.fitnessHealth.setCoreAvailable(false, session)
+                        FitnessSyncWorker.cancel(getApplication())
+                        fitnessStateSyncJob?.cancel()
+                        fitnessStateSyncJob = null
+                        _state.update { it.copy(fitnessCoreAvailable = false) }
+                    }
+                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
+                }
+        }
+    }
+
+    fun syncFitnessFromHealth(showStatus: Boolean = false) {
+        val session = _state.value.session ?: return
+        if (session.isDemo) return
+        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
+        viewModelScope.launch {
+            val availableSnapshot = runCatching { container.api.fetchFitness(session, refresh = true) }
+                .getOrElse { error ->
+                    if (isFitnessCoreUnavailable(error)) {
+                        container.fitnessHealth.setCoreAvailable(false, session)
+                        FitnessSyncWorker.cancel(getApplication())
+                        fitnessStateSyncJob?.cancel()
+                        fitnessStateSyncJob = null
+                        _state.update { it.copy(fitnessCoreAvailable = false) }
+                    }
+                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
+                    return@launch
+                }
+            container.fitnessHealth.setCoreAvailable(true, session)
+            _state.update { it.copy(fitnessCoreAvailable = true) }
+            if (_state.value.activeLane == LittleSpudLane.FITNESS) startFitnessStateSync()
+            val granted = runCatching { container.fitnessHealth.grantedPermissions() }
+                .getOrElse { error ->
+                    container.settings.fitnessSyncEnabled = false
+                    _state.update {
+                        it.copy(
+                            fitnessLoading = false,
+                            fitnessHealthConnected = false,
+                            fitnessError = if (container.fitnessHealth.isAvailable) fitnessError(error) else "",
+                        )
+                    }
+                    return@launch
+                }
+            if (!container.fitnessHealth.hasReadAccess(granted)) {
+                container.settings.fitnessSyncEnabled = false
+                _state.update {
+                    it.copy(
+                        fitnessHealthConnected = false,
+                        fitnessError = "",
+                    )
+                }
+                refreshFitnessFromTater(session)
+                return@launch
+            }
+
+            container.settings.fitnessSyncEnabled = true
+            FitnessSyncWorker.schedule(getApplication())
+            _state.update { it.copy(fitnessHealthConnected = true) }
+            runCatching {
+                val plan = container.fitnessHealth.pendingDailyTotals(session)
+                val snapshot = if (plan.days.isEmpty()) {
+                    availableSnapshot
+                } else {
+                    container.api.syncFitness(
+                        session = session,
+                        platform = "android-health-connect",
+                        timeZone = ZoneId.systemDefault().id,
+                        permissions = container.fitnessHealth.grantedPermissions(),
+                        days = plan.days,
+                    )
+                }
+                container.fitnessHealth.markDailyTotalsSynced(plan, session)
+                snapshot
+            }.onSuccess { snapshot ->
+                container.fitnessHealth.setCoreAvailable(true, session)
+                _state.update {
+                    it.copy(
+                        fitness = snapshot,
+                        fitnessLoading = false,
+                        fitnessCoreAvailable = true,
+                        fitnessHealthConnected = true,
+                        statusText = if (showStatus) "Fitness totals synced privately with Tater." else it.statusText,
+                    )
+                }
+            }.onFailure { error ->
+                if (isFitnessCoreUnavailable(error)) {
+                    container.fitnessHealth.setCoreAvailable(false, session)
+                    FitnessSyncWorker.cancel(getApplication())
+                    fitnessStateSyncJob?.cancel()
+                    fitnessStateSyncJob = null
+                    _state.update {
+                        it.copy(
+                            fitnessLoading = false,
+                            fitnessCoreAvailable = false,
+                            fitnessError = fitnessError(error),
+                        )
+                    }
+                } else if (isFitnessPermissionError(error)) {
+                    container.settings.fitnessSyncEnabled = false
+                    _state.update {
+                        it.copy(
+                            fitnessHealthConnected = false,
+                            fitnessError = "",
+                        )
+                    }
+                    refreshFitnessFromTater(session)
+                } else {
+                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
+                }
+            }
+        }
+    }
+
+    private suspend fun refreshFitnessFromTater(session: LittleSpudSession) {
+        runCatching { container.api.fetchFitness(session, refresh = true) }
+            .onSuccess { snapshot ->
+                container.fitnessHealth.setCoreAvailable(true, session)
+                _state.update {
+                    it.copy(
+                        fitness = snapshot,
+                        fitnessLoading = false,
+                        fitnessCoreAvailable = true,
+                        fitnessError = "",
+                    )
+                }
+            }
+            .onFailure { error ->
+                if (isFitnessCoreUnavailable(error)) {
+                    container.fitnessHealth.setCoreAvailable(false, session)
+                    FitnessSyncWorker.cancel(getApplication())
+                }
+                _state.update {
+                    it.copy(
+                        fitnessLoading = false,
+                        fitnessCoreAvailable = if (isFitnessCoreUnavailable(error)) false else it.fitnessCoreAvailable,
+                        fitnessError = fitnessError(error),
+                    )
+                }
+            }
+    }
+
+    private fun isFitnessPermissionError(error: Throwable): Boolean {
+        if (error is SecurityException) return true
+        val message = error.message.orEmpty()
+        return message.contains("Health Connect", ignoreCase = true) &&
+            (message.contains("permission", ignoreCase = true) || message.contains("access", ignoreCase = true))
+    }
+
+    private fun isFitnessCoreUnavailable(error: Throwable): Boolean {
+        val status = (error as? SpudLinkException)?.statusCode
+        return (status == 404 || status == 409) &&
+            !error.message.orEmpty().contains("link little spud", ignoreCase = true)
+    }
+
+    fun refreshPersonSettings() {
+        val session = _state.value.session ?: return
+        if (session.isDemo) return
+        _state.update { it.copy(personLinkLoading = true, personLinkError = "") }
+        viewModelScope.launch {
+            runCatching { container.api.fetchPersonSettings(session) }
+                .onSuccess { settings -> _state.update { it.copy(personSettings = settings, personLinkLoading = false) } }
+                .onFailure { error ->
+                    _state.update { it.copy(personLinkLoading = false, personLinkError = friendlyError(error)) }
+                }
+        }
+    }
+
+    fun saveLinkedPerson(personId: String) {
+        val session = _state.value.session ?: return
+        if (personId.isBlank()) return
+        _state.update { it.copy(personLinkLoading = true, personLinkError = "") }
+        viewModelScope.launch {
+            runCatching { container.api.saveLinkedPerson(session, personId) }
+                .onSuccess { settings ->
+                    container.fitnessHealth.resetSyncHistory(session)
+                    _state.update {
+                        it.copy(
+                            personSettings = settings,
+                            personLinkLoading = false,
+                            statusText = "Little Spud is linked to ${settings.linkedPersonName}.",
+                        )
+                    }
+                    refreshFitness(syncHealth = _state.value.fitnessHealthConnected)
+                }
+                .onFailure { error ->
+                    _state.update { it.copy(personLinkLoading = false, personLinkError = friendlyError(error)) }
+                }
+        }
+    }
+
+    fun runFitnessChallenge(
+        action: String,
+        personId: String = "",
+        challengeId: String = "",
+        duration: String = "day",
+        metric: String = "steps",
+    ) {
+        val session = _state.value.session ?: return
+        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
+        viewModelScope.launch {
+            runCatching {
+                container.api.runFitnessChallenge(
+                    session = session,
+                    action = action,
+                    personId = personId,
+                    challengeId = challengeId,
+                    duration = duration,
+                    metric = metric,
+                    value = currentFitnessChallengeValue(metric),
+                )
+            }.onSuccess { snapshot -> _state.update { it.copy(fitness = snapshot, fitnessLoading = false) } }
+                .onFailure { error -> _state.update { it.copy(fitnessLoading = false, fitnessError = friendlyError(error)) } }
+        }
+    }
+
+    private fun currentFitnessChallengeValue(metric: String): Double? {
+        val today = _state.value.fitness.today ?: return null
+        return when (metric) {
+            "steps" -> today.steps?.toDouble()
+            "distance_m" -> today.distanceMeters
+            "exercise_minutes" -> today.exerciseMinutes
+            "workouts" -> today.workouts?.toDouble()
+            "active_energy_kcal" -> today.activeEnergyKcal
+            "weight_checkins" -> today.weightKilograms?.let { 1.0 }
+            else -> null
+        }
+    }
+
+    private fun fitnessError(error: Throwable): String {
+        val status = (error as? SpudLinkException)?.statusCode
+        val message = friendlyError(error)
+        return if (status == 409 && message.contains("link little spud", ignoreCase = true)) message
+        else if (status == 404 || status == 409) "Install and start Fitness Core from Tater Shop."
+        else message
+    }
+
+    private fun startFitnessStateSync() {
+        fitnessStateSyncJob?.cancel()
+        val currentSession = _state.value.session
+        if (currentSession == null || !container.fitnessHealth.coreAvailable(currentSession)) {
+            fitnessStateSyncJob = null
+            return
+        }
+        fitnessStateSyncJob = viewModelScope.launch {
+            var tick = 0
+            while (isActive && _state.value.activeLane == LittleSpudLane.FITNESS) {
+                delay(15_000)
+                val session = _state.value.session ?: break
+                tick += 1
+                if (tick % 20 == 0 && container.settings.fitnessSyncEnabled && _state.value.fitness.challenges.any { it.state == "active" }) {
+                    syncFitnessFromHealth()
+                } else {
+                    runCatching { container.api.fetchFitness(session, refresh = true) }
+                        .onSuccess { snapshot ->
+                            container.fitnessHealth.setCoreAvailable(true, session)
+                            _state.update { it.copy(fitness = snapshot, fitnessCoreAvailable = true) }
+                        }
+                        .onFailure { error ->
+                            if (isFitnessCoreUnavailable(error)) {
+                                container.fitnessHealth.setCoreAvailable(false, session)
+                                FitnessSyncWorker.cancel(getApplication())
+                                _state.update {
+                                    it.copy(
+                                        fitnessCoreAvailable = false,
+                                        fitnessError = fitnessError(error),
+                                    )
+                                }
+                                return@launch
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    fun refreshSatChat() {
+        val session = _state.value.session ?: return
+        if (session.isDemo) {
+            _state.update { it.copy(satChat = SatChatSnapshot(), satChatLoading = false) }
+            return
+        }
+        _state.update { it.copy(satChatLoading = true, satChatError = "") }
+        viewModelScope.launch {
+            runCatching { container.api.fetchSatChat(session) }
+                .onSuccess { snapshot -> _state.update { it.copy(satChat = snapshot, satChatLoading = false) } }
+                .onFailure { error -> _state.update { it.copy(satChatLoading = false, satChatError = friendlyError(error)) } }
+        }
+    }
+
+    fun startSatChat(participant: SatChatParticipant) {
+        val session = _state.value.session ?: return
+        if (participant.busy) return
+        if (ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            _state.update { it.copy(satChatError = "Allow microphone access to start Sat Chat.") }
+            return
+        }
+        if (participant.video && ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            _state.update { it.copy(satChatError = "Allow camera access to start video Sat Chat.") }
+            return
+        }
+        _state.update { it.copy(satChatLoading = true, satChatError = "") }
+        viewModelScope.launch {
+            runCatching {
+                container.api.controlSatChat(
+                    session,
+                    "start",
+                    target = participant.id,
+                    mode = if (participant.video) "video" else "audio",
+                )
+            }
+                .onSuccess { snapshot ->
+                    _state.update { it.copy(satChat = snapshot, satChatLoading = false) }
+                    startSatChatMedia(session)
+                }
+                .onFailure { error -> _state.update { it.copy(satChatLoading = false, satChatError = friendlyError(error)) } }
+        }
+    }
+
+    fun endSatChat() {
+        val session = _state.value.session ?: return
+        val call = _state.value.satChat.call ?: return
+        stopSatChatMedia(closeSocket = true)
+        _state.update { it.copy(satChatLoading = true, satChatError = "") }
+        viewModelScope.launch {
+            runCatching { container.api.controlSatChat(session, "end", callId = call.id) }
+                .onSuccess { snapshot -> _state.update { it.copy(satChat = snapshot, satChatLoading = false) } }
+                .onFailure { error -> _state.update { it.copy(satChatLoading = false, satChatError = friendlyError(error)) } }
+        }
+    }
+
+    private fun startSatChatMedia(session: LittleSpudSession) {
+        stopSatChatMedia(closeSocket = true)
+        val inputBuffer = AudioRecord.getMinBufferSize(
+            SAT_CHAT_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val outputBuffer = AudioTrack.getMinBufferSize(
+            SAT_CHAT_SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (inputBuffer <= 0 || outputBuffer <= 0) {
+            failSatChatMedia("This device could not open a compatible call audio stream.")
+            return
+        }
+
+        try {
+            @Suppress("MissingPermission")
+            val recorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                SAT_CHAT_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                max(inputBuffer, SAT_CHAT_BUFFER_BYTES * 2),
+            )
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAT_CHAT_SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                .setBufferSizeInBytes(max(outputBuffer, SAT_CHAT_BUFFER_BYTES * 4))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            if (recorder.state != AudioRecord.STATE_INITIALIZED || track.state != AudioTrack.STATE_INITIALIZED) {
+                recorder.release()
+                track.release()
+                throw SpudLinkException("This device could not initialize Sat Chat audio.")
+            }
+            satChatRecorder = recorder
+            satChatTrack = track
+            val audioManager = getApplication<Application>().getSystemService(AudioManager::class.java)
+            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            if (audioManager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                throw SpudLinkException("Android could not reserve audio for Sat Chat.")
+            }
+            satChatFocusRequest = focusRequest
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+            val listener = object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    viewModelScope.launch {
+                        if (satChatSocket !== webSocket) return@launch
+                        try {
+                            track.play()
+                            recorder.startRecording()
+                            if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                                throw SpudLinkException("The Sat Chat microphone did not start.")
+                            }
+                            satChatCaptureJob = viewModelScope.launch(Dispatchers.IO) {
+                                val buffer = ByteArray(SAT_CHAT_BUFFER_BYTES)
+                                while (isActive && satChatSocket === webSocket) {
+                                    val count = recorder.read(buffer, 0, buffer.size)
+                                    if (count > 0) webSocket.send(buffer.toByteString(0, count))
+                                    else if (count != AudioRecord.ERROR_INVALID_OPERATION) break
+                                }
+                            }
+                            if (_state.value.satChat.call?.mode.equals("video", true)) {
+                                startSatChatVideoCamera(webSocket)
+                            }
+                        } catch (error: Throwable) {
+                            failSatChatMedia(error.localizedMessage ?: "Sat Chat audio stopped.")
+                        }
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                    if (satChatSocket === webSocket) {
+                        val payload = bytes.toByteArray()
+                        if (payload.size > SAT_CHAT_VIDEO_PREFIX.size + 4 && payload.copyOfRange(0, SAT_CHAT_VIDEO_PREFIX.size).contentEquals(SAT_CHAT_VIDEO_PREFIX)) {
+                            _state.update { it.copy(satChatRemoteVideoFrame = payload.copyOfRange(SAT_CHAT_VIDEO_PREFIX.size, payload.size)) }
+                        } else {
+                            satChatTrack?.write(payload, 0, payload.size, AudioTrack.WRITE_NON_BLOCKING)
+                        }
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    val type = runCatching { JSONObject(text).optString("type") }.getOrDefault("")
+                    if (type == "sat_chat.ended") {
+                        viewModelScope.launch {
+                            if (satChatSocket === webSocket) {
+                                stopSatChatMedia(closeSocket = true)
+                                _state.update { it.copy(satChat = it.satChat.copy(call = null)) }
+                                refreshSatChat()
+                            }
+                        }
+                    }
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    viewModelScope.launch {
+                        if (satChatSocket === webSocket) failSatChatMedia(t.localizedMessage ?: "Sat Chat audio disconnected.")
+                    }
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    viewModelScope.launch {
+                        if (satChatSocket === webSocket) {
+                            stopSatChatMedia(closeSocket = false)
+                            refreshSatChat()
+                        }
+                    }
+                }
+            }
+            satChatSocket = container.api.openSatChatMedia(session, SAT_CHAT_SAMPLE_RATE, listener)
+        } catch (error: Throwable) {
+            failSatChatMedia(error.localizedMessage ?: "Sat Chat audio could not start.")
+        }
+    }
+
+    private fun failSatChatMedia(message: String) {
+        stopSatChatMedia(closeSocket = true)
+        _state.update { it.copy(satChatError = message) }
+        val session = _state.value.session
+        val call = _state.value.satChat.call
+        if (session != null && call != null) {
+            viewModelScope.launch {
+                runCatching { container.api.controlSatChat(session, "end", callId = call.id) }
+                refreshSatChat()
+            }
+        }
+    }
+
+    private fun startSatChatVideoCamera(webSocket: WebSocket) {
+        val application = getApplication<Application>()
+        val future = ProcessCameraProvider.getInstance(application)
+        future.addListener({
+            if (satChatSocket !== webSocket) return@addListener
+            val provider = runCatching { future.get() }.getOrElse {
+                failSatChatMedia(it.localizedMessage ?: "Android could not open the Sat Chat camera.")
+                return@addListener
+            }
+            val analysis = ImageAnalysis.Builder()
+                .setTargetResolution(Size(640, 480))
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+            analysis.setAnalyzer(satChatCameraExecutor) { frame ->
+                try {
+                    val now = System.currentTimeMillis()
+                    if (now - satChatLastCameraFrameAt < 400 || satChatSocket !== webSocket) return@setAnalyzer
+                    satChatLastCameraFrameAt = now
+                    val original = frame.toBitmap()
+                    val matrix = Matrix().apply {
+                        postRotate(frame.imageInfo.rotationDegrees.toFloat())
+                        postScale(-1f, 1f)
+                    }
+                    val rotated = Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
+                    val jpeg = ByteArrayOutputStream().use { output ->
+                        rotated.compress(Bitmap.CompressFormat.JPEG, 55, output)
+                        output.toByteArray()
+                    }
+                    if (jpeg.size <= 2 * 1024 * 1024) {
+                        webSocket.send((SAT_CHAT_VIDEO_PREFIX + jpeg).toByteString())
+                    }
+                    if (rotated !== original) rotated.recycle()
+                    original.recycle()
+                } finally {
+                    frame.close()
+                }
+            }
+            provider.unbind(analysis)
+            val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            } else {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            }
+            runCatching {
+                provider.bindToLifecycle(ProcessLifecycleOwner.get(), selector, analysis)
+            }.onSuccess {
+                satChatCameraProvider = provider
+                satChatCameraAnalysis = analysis
+            }.onFailure {
+                analysis.clearAnalyzer()
+                failSatChatMedia(it.localizedMessage ?: "Android could not start Sat Chat video.")
+            }
+        }, ContextCompat.getMainExecutor(application))
+    }
+
+    private fun stopSatChatMedia(closeSocket: Boolean) {
+        satChatCaptureJob?.cancel()
+        satChatCaptureJob = null
+        satChatCameraAnalysis?.clearAnalyzer()
+        satChatCameraAnalysis?.let { satChatCameraProvider?.unbind(it) }
+        satChatCameraAnalysis = null
+        satChatCameraProvider = null
+        satChatLastCameraFrameAt = 0L
+        _state.update { it.copy(satChatRemoteVideoFrame = null) }
+        val recorder = satChatRecorder
+        satChatRecorder = null
+        if (recorder != null) {
+            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) runCatching { recorder.stop() }
+            recorder.release()
+        }
+        val track = satChatTrack
+        satChatTrack = null
+        if (track != null) {
+            if (track.playState == AudioTrack.PLAYSTATE_PLAYING) runCatching { track.stop() }
+            track.release()
+        }
+        val socket = satChatSocket
+        satChatSocket = null
+        if (closeSocket) socket?.close(1000, "Sat Chat complete")
+        val audioManager = getApplication<Application>().getSystemService(AudioManager::class.java)
+        satChatFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+        satChatFocusRequest = null
+        audioManager.mode = AudioManager.MODE_NORMAL
     }
 
     fun sendMessage(fromVoice: Boolean = false) {
@@ -796,16 +1483,35 @@ class LittleSpudViewModel(
     }
 
     fun refreshCamera(roomId: String, cameraId: String) {
+        viewModelScope.launch {
+            refreshCameraFrame(roomId, cameraId)
+        }
+    }
+
+    suspend fun refreshCameraFrame(roomId: String, cameraId: String) {
         val session = _state.value.session ?: return
+        if (session.isDemo) return
         val key = "$roomId|$cameraId"
         if (key in _state.value.cameraLoading) return
         _state.update { it.copy(cameraLoading = it.cameraLoading + key, cameraErrors = it.cameraErrors - key) }
-        viewModelScope.launch {
-            try {
-                val bytes = container.api.fetchCameraSnapshot(session, roomId, cameraId)
-                _state.update { it.copy(cameraSnapshots = it.cameraSnapshots + (key to bytes), cameraLoading = it.cameraLoading - key) }
-            } catch (error: Throwable) {
-                _state.update { it.copy(cameraLoading = it.cameraLoading - key, cameraErrors = it.cameraErrors + (key to friendlyError(error))) }
+        try {
+            val bytes = container.api.fetchCameraSnapshot(session, roomId, cameraId)
+            _state.update {
+                it.copy(
+                    cameraSnapshots = it.cameraSnapshots + (key to bytes),
+                    cameraLoading = it.cameraLoading - key,
+                    cameraErrors = it.cameraErrors - key,
+                )
+            }
+        } catch (error: CancellationException) {
+            _state.update { it.copy(cameraLoading = it.cameraLoading - key) }
+            throw error
+        } catch (error: Throwable) {
+            _state.update {
+                it.copy(
+                    cameraLoading = it.cameraLoading - key,
+                    cameraErrors = it.cameraErrors + (key to friendlyError(error)),
+                )
             }
         }
     }
@@ -1404,6 +2110,7 @@ class LittleSpudViewModel(
         val session = _state.value.session
         pauseForegroundWork()
         cleanupVoiceInput(closeSocket = true)
+        stopSatChatMedia(closeSocket = true)
         pendingLocalPlayback = null
         localMusicController?.run {
             stop()
@@ -1434,6 +2141,7 @@ class LittleSpudViewModel(
                 val named = if (sync.assistantName.isNotBlank()) updated.copy(assistantName = sync.assistantName) else updated
                 saveSession(named)
                 mergeHistory(sync.messages, sync.activeRuns)
+                reconcileAwarenessNotifications(named)
                 _state.update { it.copy(hubConnected = true, statusText = if (showStatus) "Synced with ${named.hubName}." else it.statusText) }
                 syncPushRegistration()
             } catch (error: Throwable) {
@@ -1455,6 +2163,47 @@ class LittleSpudViewModel(
             )
         }
         saveMessages()
+    }
+
+    private suspend fun reconcileAwarenessNotifications(session: LittleSpudSession) {
+        val now = System.currentTimeMillis()
+        if (now - lastNotificationReconcileAt < 60_000) return
+        val eventIds = _state.value.notifications.mapNotNull { it.awarenessEventId }.distinct().sorted()
+        val legacyNotifications = _state.value.notifications.mapNotNull { message ->
+            if (message.awarenessEventId != null) return@mapNotNull null
+            val title = message.notificationTitle.orEmpty().trim()
+            val body = message.notificationBody.orEmpty().trim()
+            if (title.isBlank() && body.isBlank()) return@mapNotNull null
+            mapOf(
+                "id" to message.id,
+                "title" to title,
+                "message" to body,
+                "created_at" to (message.createdAt / 1000.0).toString(),
+            )
+        }
+        if (eventIds.isEmpty() && legacyNotifications.isEmpty()) return
+        lastNotificationReconcileAt = now
+        val result = try {
+            container.api.reconcileAwarenessNotifications(session, eventIds, legacyNotifications)
+        } catch (error: Throwable) {
+            Log.w("LittleSpud", "Awareness notification cleanup failed", error)
+            return
+        } ?: run {
+            Log.d("LittleSpud", "Awareness notification cleanup is not authoritative")
+            return
+        }
+        val (activeEventIds, missingNotificationIds) = result
+        val current = _state.value.notifications
+        val retained = current.filter { message ->
+            message.awarenessEventId?.let(activeEventIds::contains)
+                ?: !missingNotificationIds.contains(message.id)
+        }
+        if (retained.size == current.size) return
+        Log.i("LittleSpud", "Removed ${current.size - retained.size} stale Awareness notification(s)")
+        container.messageStore.saveNotifications(retained)
+        val unread = _state.value.notificationUnreadCount.coerceAtMost(retained.size)
+        container.settings.notificationUnreadCount = unread
+        _state.update { it.copy(notifications = retained, notificationUnreadCount = unread) }
     }
 
     private fun startNotificationPoll() {
@@ -1488,6 +2237,8 @@ class LittleSpudViewModel(
             notificationTitle = notification.title,
             notificationBody = notification.message,
             notificationPriority = notification.priority,
+            notificationSource = notification.source,
+            notificationSourceEventId = notification.sourceEventId,
         )
         val added = container.messageStore.appendNotification(local)
         if (!added) return
@@ -1644,6 +2395,7 @@ class LittleSpudViewModel(
     override fun onCleared() {
         pauseForegroundWork()
         cleanupVoiceInput(closeSocket = true)
+        stopSatChatMedia(closeSocket = true)
         localMusicProgressJob?.cancel()
         localMusicProgressJob = null
         pendingLocalPlayback = null
@@ -1651,6 +2403,7 @@ class LittleSpudViewModel(
         localMusicController = null
         localMusicControllerFuture?.let { MediaController.releaseFuture(it) }
         localMusicControllerFuture = null
+        satChatCameraExecutor.shutdownNow()
         super.onCleared()
     }
 
@@ -1663,9 +2416,12 @@ class LittleSpudViewModel(
     }
 
     private companion object {
+        val SAT_CHAT_VIDEO_PREFIX = "TSCV1".toByteArray(Charsets.US_ASCII)
         const val MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
         const val VOICE_SAMPLE_RATE = 16_000
         const val VOICE_BUFFER_BYTES = 4_096
+        const val SAT_CHAT_SAMPLE_RATE = 16_000
+        const val SAT_CHAT_BUFFER_BYTES = 1_280
     }
 }
 

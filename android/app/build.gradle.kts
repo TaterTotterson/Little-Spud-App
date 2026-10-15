@@ -26,8 +26,8 @@ android {
         applicationId = "com.tatertotterson.littlespud.android"
         minSdk = 26
         targetSdk = 37
-        versionCode = System.getenv("LITTLE_SPUD_VERSION_CODE")?.toIntOrNull()?.takeIf { it > 0 } ?: 3
-        versionName = System.getenv("LITTLE_SPUD_VERSION_NAME")?.trim()?.ifBlank { null } ?: "1.3.1"
+        versionCode = System.getenv("LITTLE_SPUD_VERSION_CODE")?.toIntOrNull()?.takeIf { it > 0 } ?: 4
+        versionName = System.getenv("LITTLE_SPUD_VERSION_NAME")?.trim()?.ifBlank { null } ?: "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -84,6 +84,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.camera:camera-core:1.6.2")
+    implementation("androidx.camera:camera-camera2:1.6.2")
+    implementation("androidx.camera:camera-lifecycle:1.6.2")
+    implementation("androidx.lifecycle:lifecycle-process:2.10.0")
+    implementation("androidx.health.connect:connect-client:1.1.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")

@@ -63,7 +63,15 @@ class ModelsTest {
             createdAt = 1_700_000_000_000,
             kind = "notification",
             attachments = listOf(
-                LittleSpudAttachment("camera-1", "porch.jpg", "image/jpeg", 42, "https://example.test/porch", ""),
+                LittleSpudAttachment(
+                    "camera-1",
+                    "porch.jpg",
+                    "image/jpeg",
+                    42,
+                    "https://example.test/porch",
+                    "",
+                    1_700_086_400_000,
+                ),
             ),
             notificationTitle = "Front Door",
             notificationBody = "Front door opened",
@@ -88,6 +96,33 @@ class ModelsTest {
 
         assertEquals("A person walked through the yard.", notification.notificationDisplayBody)
         assertEquals("Fred recognized", notification.notificationFaceIdSummary)
+    }
+
+    @Test
+    fun awarenessEventIdPersistsAndMigratesFromAttachmentNames() {
+        val explicit = LittleSpudMessage(
+            role = LittleSpudRole.ASSISTANT,
+            content = "Motion detected",
+            kind = "notification",
+            notificationSource = "awareness_core",
+            notificationSourceEventId = "event-explicit-123",
+        )
+        assertEquals("event-explicit-123", LittleSpudMessage.fromJson(explicit.toJson())?.awarenessEventId)
+
+        val legacy = LittleSpudMessage(
+            role = LittleSpudRole.ASSISTANT,
+            content = "Motion detected",
+            kind = "notification",
+            attachments = listOf(
+                LittleSpudAttachment(
+                    id = "clip",
+                    name = "awareness-event-legacy-456.mp4",
+                    type = "video/mp4",
+                    size = 42,
+                ),
+            ),
+        )
+        assertEquals("event-legacy-456", legacy.awarenessEventId)
     }
 
     @Test

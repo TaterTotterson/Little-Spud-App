@@ -57,6 +57,8 @@ class LittleSpudMessagingService : FirebaseMessagingService() {
             notificationTitle = resolved.title,
             notificationBody = resolved.message,
             notificationPriority = resolved.priority,
+            notificationSource = resolved.source,
+            notificationSourceEventId = resolved.sourceEventId,
         )
         if (container.messageStore.appendNotification(local)) {
             container.settings.notificationUnreadCount += 1

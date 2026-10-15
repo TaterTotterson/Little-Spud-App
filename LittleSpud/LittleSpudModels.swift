@@ -31,6 +31,34 @@ enum LittleSpudLane: String, Codable {
     case chat
     case home
     case music
+    case satChat
+    case cameras
+    case fitness
+}
+
+struct LittleSpudSatChatParticipant: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var room: String
+    var board: String
+    var audio: Bool
+    var video: Bool
+    var busy: Bool
+}
+
+struct LittleSpudSatChatCall: Equatable {
+    var id: String
+    var state: String
+    var mode: String
+    var callerName: String
+    var targetName: String
+}
+
+struct LittleSpudSatChatSnapshot: Equatable {
+    var participants: [LittleSpudSatChatParticipant]
+    var call: LittleSpudSatChatCall?
+
+    static let empty = LittleSpudSatChatSnapshot(participants: [], call: nil)
 }
 
 enum LittleSpudTemperatureUnitPreference: String, CaseIterable, Identifiable {
@@ -211,6 +239,7 @@ struct LittleSpudAttachment: Codable, Identifiable, Equatable {
     var size: Int
     var previewUrl: String
     var dataUrl: String
+    var expiresAt: Date? = nil
 
     var displayName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "attachment" : name
@@ -227,6 +256,8 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
     var notificationTitle: String?
     var notificationBody: String?
     var notificationPriority: String?
+    var notificationSource: String?
+    var notificationSourceEventID: String?
 
     init(
         id: String,
@@ -237,7 +268,9 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
         attachments: [LittleSpudAttachment] = [],
         notificationTitle: String? = nil,
         notificationBody: String? = nil,
-        notificationPriority: String? = nil
+        notificationPriority: String? = nil,
+        notificationSource: String? = nil,
+        notificationSourceEventID: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -248,6 +281,8 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
         self.notificationTitle = notificationTitle
         self.notificationBody = notificationBody
         self.notificationPriority = notificationPriority
+        self.notificationSource = notificationSource
+        self.notificationSourceEventID = notificationSourceEventID
     }
 
     enum CodingKeys: String, CodingKey {
@@ -260,6 +295,8 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
         case notificationTitle
         case notificationBody
         case notificationPriority
+        case notificationSource
+        case notificationSourceEventID
     }
 
     init(from decoder: Decoder) throws {
@@ -273,6 +310,26 @@ struct LittleSpudMessage: Codable, Identifiable, Equatable {
         notificationTitle = try container.decodeIfPresent(String.self, forKey: .notificationTitle)
         notificationBody = try container.decodeIfPresent(String.self, forKey: .notificationBody)
         notificationPriority = try container.decodeIfPresent(String.self, forKey: .notificationPriority)
+        notificationSource = try container.decodeIfPresent(String.self, forKey: .notificationSource)
+        notificationSourceEventID = try container.decodeIfPresent(String.self, forKey: .notificationSourceEventID)
+    }
+
+    var awarenessEventID: String? {
+        let explicitSource = notificationSource?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let explicitID = notificationSourceEventID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if explicitSource == "awareness_core", !explicitID.isEmpty {
+            return explicitID
+        }
+        for attachment in attachments {
+            let name = attachment.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard name.lowercased().hasPrefix("awareness-") else { continue }
+            let stem = (name as NSString).deletingPathExtension
+            let candidate = String(stem.dropFirst("awareness-".count))
+            if candidate.count >= 8, !["camera", "doorbell"].contains(candidate.lowercased()) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     var notificationDisplayBody: String {
@@ -364,6 +421,8 @@ struct HubNotification {
     var createdAt: Date
     var priority: String
     var attachments: [LittleSpudAttachment] = []
+    var source: String = ""
+    var sourceEventID: String = ""
 
     var content: String {
         if !title.isEmpty && !message.isEmpty {
@@ -623,6 +682,111 @@ struct LittleSpudMusicSnapshot: Equatable {
         targets: [],
         player: .idle,
         syncedAt: nil
+    )
+}
+
+struct LittleSpudFitnessDay: Identifiable, Equatable {
+    var id: String { date }
+    var date: String
+    var steps: Int?
+    var distanceMeters: Double?
+    var activeEnergyKcal: Double?
+    var exerciseMinutes: Double?
+    var workouts: Int?
+    var sleepMinutes: Double?
+    var sleepCoreMinutes: Double?
+    var sleepDeepMinutes: Double?
+    var sleepREMMinutes: Double?
+    var sleepAwakeMinutes: Double?
+    var heartRateAverage: Double?
+    var heartRateMinimum: Double?
+    var heartRateMaximum: Double?
+    var restingHeartRate: Double?
+    var heartRateVariability: Double?
+    var bloodPressureSystolic: Double?
+    var bloodPressureDiastolic: Double?
+    var oxygenSaturationPercent: Double?
+    var respiratoryRate: Double?
+    var weightKilograms: Double?
+    var bodyFatPercent: Double?
+}
+
+struct LittleSpudFitnessInsight: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var headline: String
+    var detail: String
+    var recordedDate: String
+}
+
+struct LittleSpudFitnessChallengeType: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var unit: String
+    var scoreKind: String
+    var description: String
+}
+
+struct LittleSpudPersonOption: Identifiable, Hashable {
+    var id: String
+    var name: String
+}
+
+struct LittleSpudPersonSettings: Equatable {
+    var linkedPersonID: String
+    var linkedPersonName: String
+    var people: [LittleSpudPersonOption]
+
+    static let empty = LittleSpudPersonSettings(linkedPersonID: "", linkedPersonName: "", people: [])
+}
+
+struct LittleSpudFitnessChallenge: Identifiable, Equatable {
+    var id: String
+    var state: String
+    var duration: String
+    var opponentID: String
+    var opponentName: String
+    var metric: String
+    var metricTitle: String
+    var unit: String
+    var scoreKind: String
+    var myScore: Double
+    var theirScore: Double
+    var startAt: Date?
+    var endAt: Date?
+    var incoming: Bool
+    var result: String
+}
+
+struct LittleSpudFitnessSnapshot: Equatable {
+    var available: Bool
+    var configured: Bool
+    var person: LittleSpudPersonOption?
+    var challengePeople: [LittleSpudPersonOption]
+    var today: LittleSpudFitnessDay?
+    var recentDays: [LittleSpudFitnessDay]
+    var summaryHeadline: String
+    var summaryDetail: String
+    var insights: [LittleSpudFitnessInsight]
+    var challengeTypes: [LittleSpudFitnessChallengeType]
+    var challenges: [LittleSpudFitnessChallenge]
+    var lastSyncAt: Date?
+    var privacyMessage: String
+
+    static let empty = LittleSpudFitnessSnapshot(
+        available: false,
+        configured: false,
+        person: nil,
+        challengePeople: [],
+        today: nil,
+        recentDays: [],
+        summaryHeadline: "Fitness Core",
+        summaryDetail: "Install and start Fitness Core in Tater to use private health sync.",
+        insights: [],
+        challengeTypes: [],
+        challenges: [],
+        lastSyncAt: nil,
+        privacyMessage: "Daily totals only; raw health samples stay on this phone."
     )
 }
 

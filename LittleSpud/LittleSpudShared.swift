@@ -26,6 +26,8 @@ enum LittleSpudShared {
         var createdAt: Date
         var priority: String
         var attachments: [ResolvedAttachment]?
+        var source: String?
+        var sourceEventID: String?
 
         var content: String {
             if !title.isEmpty && !message.isEmpty {

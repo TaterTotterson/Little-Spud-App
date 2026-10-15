@@ -85,6 +85,10 @@ class SettingsStore(private val context: Context) {
         )
         set(value) = preferences.edit().putString("temperature-unit", value.storageValue).apply()
 
+    var fitnessSyncEnabled: Boolean
+        get() = preferences.getBoolean("fitness-sync-enabled", false)
+        set(value) = preferences.edit().putBoolean("fitness-sync-enabled", value).apply()
+
     var notificationUnreadCount: Int
         get() = preferences.getInt("notification-unread-count", 0)
         set(value) = preferences.edit().putInt("notification-unread-count", value.coerceAtLeast(0)).apply()

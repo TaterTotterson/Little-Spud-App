@@ -180,7 +180,9 @@ final class NotificationService: UNNotificationServiceExtension {
             message: message,
             createdAt: dateValue(notification).ifNil(Date()),
             priority: stringValue(notification, "priority").ifEmpty("normal"),
-            attachments: attachments
+            attachments: attachments,
+            source: stringValue(notification["origin"] as? [String: Any] ?? [:], "source", "platform"),
+            sourceEventID: stringValue(notification["origin"] as? [String: Any] ?? [:], "event_id", "eventId")
         )
     }
 

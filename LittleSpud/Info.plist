@@ -56,12 +56,14 @@
     <true/>
   </dict>
   <key>NSCameraUsageDescription</key>
-  <string>Little Spud uses the camera to scan Tater pairing QR codes and attach photos when you choose to.</string>
+	<string>Little Spud uses the camera for Sat Chat video, pairing QR codes, and photos when you choose to.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Little Spud uses the microphone for voice input when you choose to start recording.</string>
   <key>NSPhotoLibraryUsageDescription</key>
   <string>Little Spud can attach photos and files you choose from your library.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Little Spud connects to your local Tater or Spud Hub on your private network.</string>
+  <key>NSHealthShareUsageDescription</key>
+  <string>Little Spud reads the health totals you choose so your private Fitness Core can show wellness trends, summaries, and activity challenges.</string>
 </dict>
 </plist>
