@@ -6,6 +6,85 @@ import MediaPlayer
 import SwiftUI
 import UIKit
 
+final class LittleSpudAudioSessionCoordinator: @unchecked Sendable {
+    enum Profile {
+        case musicPlayback
+        case inlinePlayback
+        case speechPlayback
+        case voiceInput
+        case satChat
+    }
+
+    static let shared = LittleSpudAudioSessionCoordinator()
+
+    private let queue = DispatchQueue(
+        label: "com.tatertotterson.littlespud.audio-session",
+        qos: .userInitiated
+    )
+
+    private init() {}
+
+    func activate(_ profile: Profile) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                let session = AVAudioSession.sharedInstance()
+                do {
+                    try configure(session, for: profile)
+                    try session.setActive(true)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func requestActivation(_ profile: Profile) {
+        queue.async { [self] in
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try configure(session, for: profile)
+                try session.setActive(true)
+            } catch {
+                // Best effort when restoring background music after another audio mode ends.
+            }
+        }
+    }
+
+    func deactivate() {
+        queue.async {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: [.notifyOthersOnDeactivation]
+            )
+        }
+    }
+
+    private func configure(_ session: AVAudioSession, for profile: Profile) throws {
+        switch profile {
+        case .musicPlayback:
+            try session.setCategory(.playback, mode: .default)
+        case .inlinePlayback:
+            try session.setCategory(.playback, mode: .default, options: [.duckOthers])
+        case .speechPlayback:
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers, .duckOthers])
+        case .voiceInput:
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers, .duckOthers]
+            )
+        case .satChat:
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
+            )
+        }
+    }
+}
+
 actor LittleSpudMusicArtworkCache {
     static let shared = LittleSpudMusicArtworkCache()
 
@@ -480,6 +559,8 @@ final class LittleSpudViewModel: ObservableObject {
     private var localMusicQueueSessionID = ""
     private var localMusicPlayer: AVPlayer?
     private var localMusicFinishedObserver: NSObjectProtocol?
+    private var localMusicStartTask: Task<Void, Never>?
+    private var localMusicStartGeneration = 0
     private var nowPlayingCommandsConfigured = false
     private var nowPlayingArtworkTask: Task<Void, Never>?
 
@@ -525,7 +606,7 @@ final class LittleSpudViewModel: ObservableObject {
     }
 
     func resume() {
-        guard let currentSession = session else { return }
+        guard session != nil else { return }
         endBackgroundGracePeriod()
         if isDemoMode {
             hubConnected = true
@@ -1087,7 +1168,7 @@ final class LittleSpudViewModel: ObservableObject {
                     target: participant.id,
                     mode: mode
                 )
-                try startSatChatMedia(session: currentSession)
+                try await startSatChatMedia(session: currentSession)
             } catch {
                 satChatError = error.localizedDescription
                 if let call = satChatSnapshot.call {
@@ -1114,9 +1195,9 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
-    private func startSatChatMedia(session: LittleSpudSession) throws {
-        stopSatChatMedia()
-        try configureAudioSessionForSatChat()
+    private func startSatChatMedia(session: LittleSpudSession) async throws {
+        stopSatChatMedia(deactivateSession: false)
+        try await LittleSpudAudioSessionCoordinator.shared.activate(.satChat)
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         guard let playbackFormat = AVAudioFormat(
@@ -1211,7 +1292,7 @@ final class LittleSpudViewModel: ObservableObject {
         if !player.isPlaying { player.play() }
     }
 
-    private func stopSatChatMedia() {
+    private func stopSatChatMedia(deactivateSession: Bool = true) {
         satChatCameraCapture?.stop()
         satChatCameraCapture = nil
         satChatVideoFrameSender?.stop()
@@ -1228,7 +1309,9 @@ final class LittleSpudViewModel: ObservableObject {
         satChatPlayerNode = nil
         satChatAudioEngine = nil
         satChatScheduledBuffers = 0
-        deactivateAudioSessionIfIdle()
+        if deactivateSession {
+            deactivateAudioSessionIfIdle()
+        }
     }
 
     func toggleNotificationLane() {
@@ -1744,7 +1827,12 @@ final class LittleSpudViewModel: ObservableObject {
         _ track: LittleSpudMusicTrack,
         session currentSession: LittleSpudSession
     ) {
+        localMusicStartGeneration += 1
+        let generation = localMusicStartGeneration
+        localMusicStartTask?.cancel()
+
         guard !currentSession.isDemo else {
+            localMusicStartTask = nil
             localMusicTrack = track
             localMusicStatus = "playing"
             musicProgressSeconds = 0
@@ -1754,15 +1842,40 @@ final class LittleSpudViewModel: ObservableObject {
             HapticManager.shared.play("messageComplete")
             return
         }
+
+        localMusicStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.startLocalMusicPlayback(
+                track,
+                session: currentSession,
+                generation: generation
+            )
+        }
+    }
+
+    private func startLocalMusicPlayback(
+        _ track: LittleSpudMusicTrack,
+        session currentSession: LittleSpudSession,
+        generation: Int
+    ) async {
+        defer {
+            if generation == localMusicStartGeneration {
+                localMusicStartTask = nil
+            }
+        }
         do {
             let streamURL = try api.musicStreamURL(
                 session: currentSession,
                 track: track
             )
-            stopLocalMusic(clearTrack: false)
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default)
-            try audioSession.setActive(true)
+            stopLocalMusic(
+                clearTrack: false,
+                cancelPendingStart: false,
+                deactivateSession: false
+            )
+            try await LittleSpudAudioSessionCoordinator.shared.activate(.musicPlayback)
+            try Task.checkCancellation()
+            guard generation == localMusicStartGeneration else { return }
             let item = AVPlayerItem(url: streamURL)
             let player = AVPlayer(playerItem: item)
             player.volume = Float(musicVolumePercent) / 100
@@ -1788,14 +1901,26 @@ final class LittleSpudViewModel: ObservableObject {
             scheduleLocalMusicContinuationIfNeeded(session: currentSession)
             musicError = ""
             HapticManager.shared.play("messageComplete")
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == localMusicStartGeneration else { return }
             localMusicStatus = "error"
             musicError = error.localizedDescription
             clearNowPlayingInfo()
         }
     }
 
-    private func stopLocalMusic(clearTrack: Bool = false) {
+    private func stopLocalMusic(
+        clearTrack: Bool = false,
+        cancelPendingStart: Bool = true,
+        deactivateSession: Bool = true
+    ) {
+        if cancelPendingStart {
+            localMusicStartGeneration += 1
+            localMusicStartTask?.cancel()
+            localMusicStartTask = nil
+        }
         localMusicPlayer?.pause()
         localMusicPlayer = nil
         if let observer = localMusicFinishedObserver {
@@ -1817,7 +1942,9 @@ final class LittleSpudViewModel: ObservableObject {
             localMusicQueueSessionID = ""
             localMusicRadioName = "Little Spud Continuous Radio"
         }
-        deactivateAudioSessionIfIdle()
+        if deactivateSession {
+            deactivateAudioSessionIfIdle()
+        }
     }
 
     private func startLocalMusicQueue(
@@ -3431,7 +3558,7 @@ final class LittleSpudViewModel: ObservableObject {
                 stopSpeech()
                 cleanupVoiceInput(closeSocket: true)
 
-                try configureAudioSessionForVoiceInput()
+                try await LittleSpudAudioSessionCoordinator.shared.activate(.voiceInput)
 
                 let engine = AVAudioEngine()
                 let inputNode = engine.inputNode
@@ -3731,7 +3858,7 @@ final class LittleSpudViewModel: ObservableObject {
         let speechText = textForSpeech(value)
         guard !speechText.isEmpty else { return nil }
         if session.isDemo {
-            return prepareDemoSpeechPlayback(speechText)
+            return await prepareDemoSpeechPlayback(speechText)
         }
         stopSpeech()
         ttsStatus = "Preparing voice..."
@@ -3739,7 +3866,7 @@ final class LittleSpudViewModel: ObservableObject {
         do {
             let data = try await api.fetchSpeech(session: session, text: speechText)
             guard ttsEnabled else { return nil }
-            try configureAudioSessionForSpeechPlayback()
+            try await LittleSpudAudioSessionCoordinator.shared.activate(.speechPlayback)
             let player = try AVAudioPlayer(data: data)
             player.prepareToPlay()
             audioPlayer = player
@@ -3764,10 +3891,10 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
-    private func prepareDemoSpeechPlayback(_ speechText: String) -> Task<Void, Never>? {
+    private func prepareDemoSpeechPlayback(_ speechText: String) async -> Task<Void, Never>? {
         stopSpeech()
         ttsStatus = "Speaking..."
-        try? configureAudioSessionForSpeechPlayback()
+        try? await LittleSpudAudioSessionCoordinator.shared.activate(.speechPlayback)
         let utterance = AVSpeechUtterance(string: speechText)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
@@ -3795,37 +3922,9 @@ final class LittleSpudViewModel: ObservableObject {
         deactivateAudioSessionIfIdle()
     }
 
-    private func configureAudioSessionForSpeechPlayback() throws {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers, .duckOthers])
-        try audioSession.setActive(true)
-    }
-
-    private func configureAudioSessionForVoiceInput() throws {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers, .duckOthers]
-        )
-        try audioSession.setActive(true)
-    }
-
-    private func configureAudioSessionForSatChat() throws {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
-        )
-        try audioSession.setActive(true)
-    }
-
     private func deactivateAudioSessionIfIdle() {
         if localMusicPlayer != nil {
-            let audioSession = AVAudioSession.sharedInstance()
-            try? audioSession.setCategory(.playback, mode: .default)
-            try? audioSession.setActive(true)
+            LittleSpudAudioSessionCoordinator.shared.requestActivation(.musicPlayback)
             return
         }
         guard audioPlayer == nil,
@@ -3833,7 +3932,7 @@ final class LittleSpudViewModel: ObservableObject {
               satChatAudioEngine == nil,
               !speechSynthesizer.isSpeaking
         else { return }
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        LittleSpudAudioSessionCoordinator.shared.deactivate()
     }
 
     private func textForSpeech(_ value: String) -> String {

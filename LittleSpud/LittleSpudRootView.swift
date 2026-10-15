@@ -5539,9 +5539,18 @@ private struct InlineAudioPlayerView: View {
             return
         }
 
-        configureAudioSession()
-        player.play()
         isPlaying = true
+        let selectedPlayer = player
+        Task { @MainActor in
+            do {
+                try await LittleSpudAudioSessionCoordinator.shared.activate(.inlinePlayback)
+                guard self.player === selectedPlayer, isPlaying else { return }
+                selectedPlayer.play()
+            } catch {
+                guard self.player === selectedPlayer else { return }
+                isPlaying = false
+            }
+        }
     }
 
     private func configurePlayer() {
@@ -5579,16 +5588,6 @@ private struct InlineAudioPlayerView: View {
         timeObserver = nil
         finishObserver = nil
         isPlaying = false
-    }
-
-    private func configureAudioSession() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.duckOthers])
-            try session.setActive(true)
-        } catch {
-            // The player can still attempt playback if the session setup fails.
-        }
     }
 
 }
