@@ -65,5 +65,7 @@
   <string>Little Spud connects to your local Tater or Spud Hub on your private network.</string>
   <key>NSHealthShareUsageDescription</key>
   <string>Little Spud reads the health totals you choose so your private Fitness Core can show wellness trends, summaries, and activity challenges.</string>
+  <key>NSHealthUpdateUsageDescription</key>
+  <string>Little Spud uses HealthKit access to keep the health and fitness totals you choose synchronized with your private Fitness Core.</string>
 </dict>
 </plist>
