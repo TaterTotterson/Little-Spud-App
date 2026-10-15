@@ -33,7 +33,6 @@ enum LittleSpudLane: String, Codable {
     case music
     case satChat
     case cameras
-    case fitness
 }
 
 struct LittleSpudSatChatParticipant: Identifiable, Equatable {
@@ -685,48 +684,6 @@ struct LittleSpudMusicSnapshot: Equatable {
     )
 }
 
-struct LittleSpudFitnessDay: Identifiable, Equatable {
-    var id: String { date }
-    var date: String
-    var steps: Int?
-    var distanceMeters: Double?
-    var activeEnergyKcal: Double?
-    var exerciseMinutes: Double?
-    var workouts: Int?
-    var sleepMinutes: Double?
-    var sleepCoreMinutes: Double?
-    var sleepDeepMinutes: Double?
-    var sleepREMMinutes: Double?
-    var sleepAwakeMinutes: Double?
-    var heartRateAverage: Double?
-    var heartRateMinimum: Double?
-    var heartRateMaximum: Double?
-    var restingHeartRate: Double?
-    var heartRateVariability: Double?
-    var bloodPressureSystolic: Double?
-    var bloodPressureDiastolic: Double?
-    var oxygenSaturationPercent: Double?
-    var respiratoryRate: Double?
-    var weightKilograms: Double?
-    var bodyFatPercent: Double?
-}
-
-struct LittleSpudFitnessInsight: Identifiable, Equatable {
-    var id: String
-    var title: String
-    var headline: String
-    var detail: String
-    var recordedDate: String
-}
-
-struct LittleSpudFitnessChallengeType: Identifiable, Equatable {
-    var id: String
-    var title: String
-    var unit: String
-    var scoreKind: String
-    var description: String
-}
-
 struct LittleSpudPersonOption: Identifiable, Hashable {
     var id: String
     var name: String
@@ -738,56 +695,6 @@ struct LittleSpudPersonSettings: Equatable {
     var people: [LittleSpudPersonOption]
 
     static let empty = LittleSpudPersonSettings(linkedPersonID: "", linkedPersonName: "", people: [])
-}
-
-struct LittleSpudFitnessChallenge: Identifiable, Equatable {
-    var id: String
-    var state: String
-    var duration: String
-    var opponentID: String
-    var opponentName: String
-    var metric: String
-    var metricTitle: String
-    var unit: String
-    var scoreKind: String
-    var myScore: Double
-    var theirScore: Double
-    var startAt: Date?
-    var endAt: Date?
-    var incoming: Bool
-    var result: String
-}
-
-struct LittleSpudFitnessSnapshot: Equatable {
-    var available: Bool
-    var configured: Bool
-    var person: LittleSpudPersonOption?
-    var challengePeople: [LittleSpudPersonOption]
-    var today: LittleSpudFitnessDay?
-    var recentDays: [LittleSpudFitnessDay]
-    var summaryHeadline: String
-    var summaryDetail: String
-    var insights: [LittleSpudFitnessInsight]
-    var challengeTypes: [LittleSpudFitnessChallengeType]
-    var challenges: [LittleSpudFitnessChallenge]
-    var lastSyncAt: Date?
-    var privacyMessage: String
-
-    static let empty = LittleSpudFitnessSnapshot(
-        available: false,
-        configured: false,
-        person: nil,
-        challengePeople: [],
-        today: nil,
-        recentDays: [],
-        summaryHeadline: "Fitness Core",
-        summaryDetail: "Install and start Fitness Core in Tater to use private health sync.",
-        insights: [],
-        challengeTypes: [],
-        challenges: [],
-        lastSyncAt: nil,
-        privacyMessage: "Daily totals only; raw health samples stay on this phone."
-    )
 }
 
 struct LittleSpudPushRegistration: Codable, Equatable {

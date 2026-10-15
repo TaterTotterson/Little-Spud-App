@@ -6,11 +6,6 @@ import android.util.Base64
 import com.tatertotterson.littlespud.android.BuildConfig
 import com.tatertotterson.littlespud.android.model.CameraPreview
 import com.tatertotterson.littlespud.android.model.ConnectionRoute
-import com.tatertotterson.littlespud.android.model.FitnessChallenge
-import com.tatertotterson.littlespud.android.model.FitnessChallengeType
-import com.tatertotterson.littlespud.android.model.FitnessDay
-import com.tatertotterson.littlespud.android.model.FitnessInsight
-import com.tatertotterson.littlespud.android.model.FitnessSnapshot
 import com.tatertotterson.littlespud.android.model.HomeCategory
 import com.tatertotterson.littlespud.android.model.HomeRoom
 import com.tatertotterson.littlespud.android.model.HomeSnapshot
@@ -251,63 +246,6 @@ class SpudLinkApi(
         return fetchSatChat(session)
     }
 
-    suspend fun fetchFitness(session: LittleSpudSession, refresh: Boolean = false): FitnessSnapshot =
-        normalizeFitnessSnapshot(
-            executeJson(
-                authorizedRequest(session, "/api/spudlink/v1/fitness?refresh=$refresh").get().build(),
-                "Fitness",
-                25,
-            ),
-        )
-
-    suspend fun syncFitness(
-        session: LittleSpudSession,
-        platform: String,
-        timeZone: String,
-        permissions: Set<String>,
-        days: List<FitnessDay>,
-    ): FitnessSnapshot {
-        val body = JSONObject().apply {
-            put("platform", platform)
-            put("time_zone", timeZone)
-            put("permissions", permissions.toJsonArray { it })
-            put("days", days.take(120).toJsonArray { day ->
-                JSONObject().apply {
-                    put("date", day.date)
-                    day.steps?.let { put("steps", it) }
-                    day.distanceMeters?.let { put("distance_m", it) }
-                    day.activeEnergyKcal?.let { put("active_energy_kcal", it) }
-                    day.exerciseMinutes?.let { put("exercise_minutes", it) }
-                    day.workouts?.let { put("workouts", it) }
-                    day.sleepMinutes?.let { put("sleep_minutes", it) }
-                    day.sleepCoreMinutes?.let { put("sleep_core_minutes", it) }
-                    day.sleepDeepMinutes?.let { put("sleep_deep_minutes", it) }
-                    day.sleepRemMinutes?.let { put("sleep_rem_minutes", it) }
-                    day.sleepAwakeMinutes?.let { put("sleep_awake_minutes", it) }
-                    day.heartRateAverage?.let { put("heart_rate_avg_bpm", it) }
-                    day.heartRateMinimum?.let { put("heart_rate_min_bpm", it) }
-                    day.heartRateMaximum?.let { put("heart_rate_max_bpm", it) }
-                    day.restingHeartRate?.let { put("resting_heart_rate_bpm", it) }
-                    day.heartRateVariability?.let { put("heart_rate_variability_ms", it) }
-                    day.bloodPressureSystolic?.let { put("blood_pressure_systolic_mmhg", it) }
-                    day.bloodPressureDiastolic?.let { put("blood_pressure_diastolic_mmhg", it) }
-                    day.oxygenSaturationPercent?.let { put("oxygen_saturation_percent", it) }
-                    day.respiratoryRate?.let { put("respiratory_rate_per_min", it) }
-                    day.weightKilograms?.let { put("weight_kg", it) }
-                    day.bodyFatPercent?.let { put("body_fat_percent", it) }
-                }
-            })
-        }
-        return normalizeFitnessSnapshot(
-            executeJson(
-                authorizedRequest(session, "/api/spudlink/v1/fitness/sync")
-                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
-                "Fitness sync",
-                35,
-            ),
-        )
-    }
-
     suspend fun fetchPersonSettings(session: LittleSpudSession): PersonSettings = normalizePersonSettings(
         executeJson(authorizedRequest(session, "/api/spudlink/v1/person").get().build(), "People", 25),
     )
@@ -320,30 +258,6 @@ class SpudLinkApi(
                     .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
                 "Person link",
                 25,
-            ),
-        )
-    }
-
-    suspend fun runFitnessChallenge(
-        session: LittleSpudSession,
-        action: String,
-        personId: String = "",
-        challengeId: String = "",
-        duration: String = "day",
-        metric: String = "steps",
-        value: Double? = null,
-    ): FitnessSnapshot {
-        val body = JSONObject().apply {
-            put("action", action); put("person_id", personId); put("challenge_id", challengeId)
-            put("duration", duration); put("metric", metric)
-            value?.let { put("value", it.coerceAtLeast(0.0)) }
-        }
-        return normalizeFitnessSnapshot(
-            executeJson(
-                authorizedRequest(session, "/api/spudlink/v1/fitness/challenges")
-                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build(),
-                "Fitness challenge",
-                30,
             ),
         )
     }
@@ -1001,92 +915,6 @@ class SpudLinkApi(
             if (id.isBlank()) null else PersonOption(id, row.string("name").ifBlank { "Person" })
         },
     )
-
-    private fun normalizeFitnessSnapshot(payload: JSONObject): FitnessSnapshot {
-        fun day(row: JSONObject?): FitnessDay? {
-            row ?: return null
-            val date = row.string("date"); if (date.isBlank()) return null
-            return FitnessDay(
-                date = date,
-                steps = row.doubleOrNull("steps")?.toInt(),
-                distanceMeters = row.doubleOrNull("distance_m"),
-                activeEnergyKcal = row.doubleOrNull("active_energy_kcal"),
-                exerciseMinutes = row.doubleOrNull("exercise_minutes"),
-                workouts = row.doubleOrNull("workouts")?.toInt(),
-                sleepMinutes = row.doubleOrNull("sleep_minutes"),
-                sleepCoreMinutes = row.doubleOrNull("sleep_core_minutes"),
-                sleepDeepMinutes = row.doubleOrNull("sleep_deep_minutes"),
-                sleepRemMinutes = row.doubleOrNull("sleep_rem_minutes"),
-                sleepAwakeMinutes = row.doubleOrNull("sleep_awake_minutes"),
-                heartRateAverage = row.doubleOrNull("heart_rate_avg_bpm"),
-                heartRateMinimum = row.doubleOrNull("heart_rate_min_bpm"),
-                heartRateMaximum = row.doubleOrNull("heart_rate_max_bpm"),
-                restingHeartRate = row.doubleOrNull("resting_heart_rate_bpm"),
-                heartRateVariability = row.doubleOrNull("heart_rate_variability_ms"),
-                bloodPressureSystolic = row.doubleOrNull("blood_pressure_systolic_mmhg"),
-                bloodPressureDiastolic = row.doubleOrNull("blood_pressure_diastolic_mmhg"),
-                oxygenSaturationPercent = row.doubleOrNull("oxygen_saturation_percent"),
-                respiratoryRate = row.doubleOrNull("respiratory_rate_per_min"),
-                weightKilograms = row.doubleOrNull("weight_kg"),
-                bodyFatPercent = row.doubleOrNull("body_fat_percent"),
-            )
-        }
-        fun person(row: JSONObject?): PersonOption? {
-            row ?: return null
-            val id = row.string("id")
-            return if (id.isBlank()) null else PersonOption(id, row.string("name").ifBlank { "Person" })
-        }
-        val summary = payload.objectOrNull("summary")
-        val privacy = payload.objectOrNull("privacy")
-        return FitnessSnapshot(
-            available = payload.booleanOrNull("available") ?: true,
-            configured = payload.booleanOrNull("configured") ?: false,
-            person = person(payload.objectOrNull("person")),
-            challengePeople = payload.objectArray("challenge_people").mapNotNull(::person),
-            today = day(payload.objectOrNull("today")),
-            recentDays = payload.objectArray("recent_days").mapNotNull(::day),
-            summaryHeadline = summary?.string("headline").orEmpty().ifBlank { "Your fitness" },
-            summaryDetail = summary?.string("detail").orEmpty(),
-            insights = summary?.objectArray("insights").orEmpty().mapNotNull { row ->
-                val id = row.string("id")
-                if (id.isBlank()) null else FitnessInsight(
-                    id = id,
-                    title = row.string("title").ifBlank { "Health" },
-                    headline = row.string("headline"),
-                    detail = row.string("detail"),
-                    recordedDate = row.string("recorded_date"),
-                )
-            },
-            challengeTypes = payload.objectArray("challenge_types").mapNotNull { row ->
-                val id = row.string("id")
-                if (id.isBlank()) null else FitnessChallengeType(
-                    id = id,
-                    title = row.string("title").ifBlank { id },
-                    unit = row.string("unit"),
-                    scoreKind = row.string("score_kind"),
-                    description = row.string("description"),
-                )
-            },
-            challenges = payload.objectArray("challenges").mapNotNull { row ->
-                val id = row.string("id"); if (id.isBlank()) return@mapNotNull null
-                FitnessChallenge(
-                    id = id, state = row.string("state"), duration = row.string("duration"),
-                    opponentId = row.string("opponent_id"),
-                    opponentName = row.string("opponent_name").ifBlank { "Little Spud user" },
-                    metric = row.string("metric").ifBlank { "steps" },
-                    metricTitle = row.string("metric_title").ifBlank { "Steps" },
-                    unit = row.string("unit").ifBlank { "steps" },
-                    scoreKind = row.string("score_kind").ifBlank { "highest_total" },
-                    myScore = row.doubleOrNull("my_score") ?: 0.0,
-                    theirScore = row.doubleOrNull("their_score") ?: 0.0,
-                    startAt = row.dateMillis("start_at"), endAt = row.dateMillis("end_at"),
-                    incoming = row.booleanOrNull("incoming") ?: false, result = row.string("result"),
-                )
-            },
-            lastSyncAt = payload.dateMillis("last_sync_at"),
-            privacyMessage = privacy?.string("message").orEmpty().ifBlank { "Daily totals only; raw health samples stay on this phone." },
-        )
-    }
 
     private fun normalizeMusicProvider(item: JSONObject?): MusicProvider? {
         item ?: return null

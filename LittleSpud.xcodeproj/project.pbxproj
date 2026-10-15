@@ -26,7 +26,6 @@
 		1A0000010000000000000028 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002C /* NotificationService.swift */; };
 		1A0000010000000000000029 /* LittleSpudShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002B /* LittleSpudShared.swift */; };
 		1A000001000000000000002A /* LittleSpudNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 1A000001000000000000002F /* LittleSpudNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		1A0000010000000000000030 /* FitnessHealthStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000000040 /* FitnessHealthStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -75,7 +74,6 @@
 		1A000001000000000000002D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A000001000000000000002E /* LittleSpudNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LittleSpudNotificationService.entitlements; sourceTree = "<group>"; };
 		1A000001000000000000002F /* LittleSpudNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LittleSpudNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		1A0000010000000000000040 /* FitnessHealthStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FitnessHealthStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -115,7 +113,6 @@
 				1A000001000000000000001D /* LittleSpudViewModel.swift */,
 				1A000001000000000000001C /* SpudLinkAPI.swift */,
 				1A0000010000000000000019 /* LittleSpudModels.swift */,
-				1A0000010000000000000040 /* FitnessHealthStore.swift */,
 				1A000001000000000000002B /* LittleSpudShared.swift */,
 				1A000001000000000000001A /* KeychainStore.swift */,
 				1A0000010000000000000012 /* LocalNotificationManager.swift */,
@@ -213,9 +210,6 @@
 							com.apple.Push = {
 								enabled = 1;
 							};
-							com.apple.HealthKit = {
-								enabled = 1;
-							};
 						};
 					};
 					1A0000010000000000000042 = {
@@ -282,7 +276,6 @@
 				1A000001000000000000000B /* LittleSpudViewModel.swift in Sources */,
 				1A000001000000000000000A /* SpudLinkAPI.swift in Sources */,
 				1A0000010000000000000007 /* LittleSpudModels.swift in Sources */,
-				1A0000010000000000000030 /* FitnessHealthStore.swift in Sources */,
 				1A0000010000000000000027 /* LittleSpudShared.swift in Sources */,
 				1A0000010000000000000008 /* KeychainStore.swift in Sources */,
 				1A0000010000000000000002 /* LocalNotificationManager.swift in Sources */,

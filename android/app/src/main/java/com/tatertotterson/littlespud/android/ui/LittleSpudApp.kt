@@ -48,7 +48,6 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
@@ -120,7 +119,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
-import androidx.health.connect.client.PermissionController
 import coil3.compose.AsyncImage
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -248,7 +246,6 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
             LittleSpudLane.SAT_CHAT,
             LittleSpudLane.MUSIC,
             LittleSpudLane.CAMERAS,
-            LittleSpudLane.FITNESS,
             LittleSpudLane.NOTIFICATIONS,
         )
     }
@@ -301,7 +298,6 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
                         LittleSpudLane.MUSIC -> "Music" to Icons.Default.MusicNote
                         LittleSpudLane.SAT_CHAT -> "Sat Chat" to Icons.Default.Mic
                         LittleSpudLane.CAMERAS -> "Cameras" to Icons.Default.CameraAlt
-                        LittleSpudLane.FITNESS -> "Fitness" to Icons.Default.FitnessCenter
                     }
                     NavigationDrawerItem(
                         label = {
@@ -346,7 +342,6 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
                                     LittleSpudLane.MUSIC -> "Music Core"
                                     LittleSpudLane.SAT_CHAT -> "Sat Chat"
                                     LittleSpudLane.CAMERAS -> "Cameras"
-                                    LittleSpudLane.FITNESS -> "Fitness"
                                 },
                                 fontWeight = FontWeight.Bold,
                             )
@@ -376,291 +371,11 @@ private fun MainShell(state: LittleSpudUiState, model: LittleSpudViewModel) {
                     LittleSpudLane.MUSIC -> MusicScreen(state, model)
                     LittleSpudLane.SAT_CHAT -> SatChatScreen(state, model)
                     LittleSpudLane.CAMERAS -> CamerasScreen(state, model)
-                    LittleSpudLane.FITNESS -> FitnessScreen(state, model)
                 }
             }
         }
     }
     if (state.showSettings) SettingsSheet(state, model)
-}
-
-@Composable
-private fun FitnessScreen(state: LittleSpudUiState, model: LittleSpudViewModel) {
-    var section by rememberSaveable { mutableStateOf("overview") }
-    var opponentPersonId by rememberSaveable { mutableStateOf("") }
-    var personMenuExpanded by remember { mutableStateOf(false) }
-    var duration by rememberSaveable { mutableStateOf("day") }
-    var challengeMetric by rememberSaveable { mutableStateOf("steps") }
-    var metricMenuExpanded by remember { mutableStateOf(false) }
-    val permissionLauncher = rememberLauncherForActivityResult(
-        PermissionController.createRequestPermissionResultContract(),
-    ) { granted -> model.finishFitnessPermissionRequest(granted) }
-    LaunchedEffect(state.fitness.challengePeople) {
-        if (state.fitness.challengePeople.none { it.id == opponentPersonId }) opponentPersonId = ""
-    }
-    LaunchedEffect(state.fitness.challengeTypes) {
-        if (state.fitness.challengeTypes.none { it.id == challengeMetric }) {
-            challengeMetric = state.fitness.challengeTypes.firstOrNull()?.id ?: "steps"
-        }
-    }
-    LaunchedEffect(challengeMetric) {
-        if (challengeMetric == "weight_checkins" && duration == "3_hours") duration = "day"
-    }
-
-    if (!state.fitnessCoreAvailable) {
-        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            if (state.fitnessLoading) {
-                CircularProgressIndicator(color = SpudOrange)
-            } else {
-                Text(
-                    state.fitnessError.ifBlank { "Install and start Fitness Core from Tater Shop." },
-                    color = SpudMuted,
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
-        return
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        if (state.fitnessError.isNotBlank()) item {
-            Card(colors = CardDefaults.cardColors(containerColor = SpudDanger.copy(alpha = .14f))) {
-                Text(state.fitnessError, color = SpudDanger, modifier = Modifier.fillMaxWidth().padding(14.dp))
-            }
-        }
-        item {
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf("overview" to "Overview", "challenges" to "Challenges").forEachIndexed { index, pair ->
-                    SegmentedButton(
-                        selected = section == pair.first,
-                        onClick = { section = pair.first },
-                        shape = SegmentedButtonDefaults.itemShape(index, 2),
-                    ) { Text(pair.second) }
-                }
-            }
-        }
-        if (state.fitnessCoreAvailable && !state.fitnessHealthConnected) item {
-            FitnessCard {
-                Text("Connect Health Connect", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "Little Spud reads the totals you approve and sends daily aggregates to your own Tater. Raw samples stay on this phone.",
-                    color = SpudMuted,
-                )
-                Button(
-                    onClick = { permissionLauncher.launch(model.fitnessPermissions()) },
-                    enabled = state.fitnessHealthAvailable && !state.fitnessLoading,
-                ) { Text(if (state.fitnessHealthAvailable) "Connect Health Connect" else "Health Connect unavailable") }
-            }
-        }
-        if (section == "overview") item {
-            FitnessCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(state.fitness.summaryHeadline, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                        Text(state.fitness.summaryDetail, color = SpudMuted)
-                    }
-                    Icon(Icons.Default.FitnessCenter, null, tint = SpudOrange, modifier = Modifier.size(36.dp))
-                }
-                Text("Informational only · not medical advice", style = MaterialTheme.typography.labelSmall, color = SpudOrange)
-                val today = state.fitness.today
-                val metrics = buildList {
-                    today?.steps?.let { add("Steps" to "%,d".format(it)) }
-                    today?.sleepMinutes?.let { add("Sleep" to fitnessMinutes(it)) }
-                    today?.heartRateAverage?.let { add("Heart rate" to "${it.toInt()} bpm") }
-                    if (today?.bloodPressureSystolic != null && today.bloodPressureDiastolic != null) {
-                        add("Blood pressure" to "${today.bloodPressureSystolic.toInt()}/${today.bloodPressureDiastolic.toInt()}")
-                    }
-                    today?.weightKilograms?.let { add("Weight" to "%.1f kg".format(it)) }
-                    today?.activeEnergyKcal?.let { add("Active energy" to "${it.toInt()} kcal") }
-                }
-                metrics.chunked(2).forEach { row ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        row.forEach { (label, value) -> FitnessMetric(label, value, Modifier.weight(1f)) }
-                        if (row.size == 1) Spacer(Modifier.weight(1f))
-                    }
-                }
-            }
-        }
-        if (section == "overview") items(state.fitness.insights, key = { "insight:${it.id}" }) { insight ->
-            FitnessCard {
-                Text(insight.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(insight.headline, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(insight.detail, color = SpudMuted)
-                if (insight.recordedDate.isNotBlank()) {
-                    Text("Recorded ${insight.recordedDate}", style = MaterialTheme.typography.labelSmall, color = SpudMuted)
-                }
-            }
-        }
-        val stepDays = state.fitness.recentDays.filter { it.steps != null }.take(7)
-        if (section == "overview" && stepDays.isNotEmpty()) item {
-            FitnessCard {
-                Text("Recent steps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                stepDays.forEach { day ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(day.date.takeLast(5), color = SpudMuted, modifier = Modifier.width(48.dp))
-                        LinearProgressIndicator(
-                            progress = { ((day.steps ?: 0) / 10_000f).coerceIn(0f, 1f) },
-                            modifier = Modifier.weight(1f).height(8.dp).clip(CircleShape),
-                            color = SpudOrange,
-                        )
-                        Text("%,d".format(day.steps ?: 0), modifier = Modifier.width(66.dp), maxLines = 1)
-                    }
-                }
-            }
-        }
-        if (section == "challenges" && state.fitness.configured) item {
-            FitnessCard {
-                Text("Start a challenge", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                state.fitness.person?.let {
-                    Text("Fitness data belongs to ${it.name}", color = SpudMuted)
-                }
-                Box(Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = { metricMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text(state.fitness.challengeTypes.firstOrNull { it.id == challengeMetric }?.title ?: "Choose a challenge")
-                    }
-                    DropdownMenu(expanded = metricMenuExpanded, onDismissRequest = { metricMenuExpanded = false }) {
-                        state.fitness.challengeTypes.forEach { type ->
-                            DropdownMenuItem(
-                                text = { Text(type.title) },
-                                onClick = { challengeMetric = type.id; metricMenuExpanded = false },
-                            )
-                        }
-                    }
-                }
-                state.fitness.challengeTypes.firstOrNull { it.id == challengeMetric }?.description?.takeIf { it.isNotBlank() }?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = SpudMuted)
-                }
-                Box(Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = { personMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text(state.fitness.challengePeople.firstOrNull { it.id == opponentPersonId }?.name ?: "Choose a person")
-                    }
-                    DropdownMenu(expanded = personMenuExpanded, onDismissRequest = { personMenuExpanded = false }) {
-                        state.fitness.challengePeople.forEach { person ->
-                            DropdownMenuItem(
-                                text = { Text(person.name) },
-                                onClick = { opponentPersonId = person.id; personMenuExpanded = false },
-                            )
-                        }
-                    }
-                }
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    val durations = buildList {
-                        if (challengeMetric != "weight_checkins") add("3_hours" to "3 hours")
-                        add("day" to "1 day")
-                        add("week" to "1 week")
-                    }
-                    durations.forEachIndexed { index, pair ->
-                        SegmentedButton(
-                            selected = duration == pair.first,
-                            onClick = { duration = pair.first },
-                            shape = SegmentedButtonDefaults.itemShape(index, durations.size),
-                        ) { Text(pair.second) }
-                    }
-                }
-                Button(
-                    onClick = {
-                        model.runFitnessChallenge(
-                            "create", personId = opponentPersonId, duration = duration, metric = challengeMetric,
-                        )
-                    },
-                    enabled = opponentPersonId.isNotBlank() && !state.fitnessLoading,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Send challenge") }
-            }
-        }
-        if (section == "challenges" && state.fitness.challenges.isEmpty()) item {
-            FitnessCard {
-                Text("No challenges yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("Create more than one challenge and track each result here.", color = SpudMuted)
-            }
-        }
-        if (section == "challenges" && state.fitness.challenges.isNotEmpty()) {
-            item { Text("Challenges", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-            items(state.fitness.challenges, key = { it.id }) { challenge ->
-                FitnessCard {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(challenge.metricTitle, fontWeight = FontWeight.Bold)
-                            Text("${challenge.opponentName} · ${challenge.duration.replace('_', ' ')}", color = SpudMuted)
-                        }
-                        AssistChip(onClick = {}, label = { Text(challenge.state.replaceFirstChar { it.uppercase() }) })
-                    }
-                    if (challenge.state == "active" || challenge.state == "completed") {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            FitnessScore("You", challenge.myScore, challenge.unit)
-                            Text("VS", color = SpudMuted, fontWeight = FontWeight.Bold)
-                            FitnessScore(challenge.opponentName, challenge.theirScore, challenge.unit)
-                        }
-                        Text(
-                            fitnessStanding(challenge),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (challenge.state == "completed" && challenge.result == "lost") SpudMuted
-                            else if (challenge.myScore >= challenge.theirScore) SpudGreen else SpudOrange,
-                        )
-                    }
-                    if (challenge.incoming) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button({ model.runFitnessChallenge("accept", challengeId = challenge.id, metric = challenge.metric) }, Modifier.weight(1f)) { Text("Accept") }
-                            OutlinedButton({ model.runFitnessChallenge("decline", challengeId = challenge.id, metric = challenge.metric) }, Modifier.weight(1f)) { Text("Decline") }
-                        }
-                    }
-                }
-            }
-        }
-        item { Text(state.fitness.privacyMessage, style = MaterialTheme.typography.bodySmall, color = SpudMuted) }
-    }
-}
-
-@Composable
-private fun FitnessCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = SpudPanel), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
-    }
-}
-
-@Composable
-private fun FitnessMetric(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(colors = CardDefaults.cardColors(containerColor = SpudPanelRaised), modifier = modifier) {
-        Column(Modifier.padding(12.dp)) {
-            Text(value, fontWeight = FontWeight.Bold)
-            Text(label, style = MaterialTheme.typography.bodySmall, color = SpudMuted)
-        }
-    }
-}
-
-@Composable
-private fun FitnessScore(label: String, value: Double, unit: String) {
-    Column {
-        Text(fitnessScore(value, unit), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Text(label, color = SpudMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-private fun fitnessMinutes(value: Double): String = "${value.toInt() / 60}h ${value.toInt() % 60}m"
-
-private fun fitnessScore(value: Double, unit: String): String {
-    if (unit == "m") return if (value >= 1000) "%.1f km".format(value / 1000) else "${value.toInt()} m"
-    val number = if (value % 1.0 == 0.0) "%,d".format(value.toLong()) else "%.1f".format(value)
-    return listOf(number, unit).filter { it.isNotBlank() }.joinToString(" ")
-}
-
-private fun fitnessStanding(challenge: com.tatertotterson.littlespud.android.model.FitnessChallenge): String {
-    if (challenge.state == "completed") return when (challenge.result) {
-        "won" -> "You won"
-        "lost" -> "${challenge.opponentName} won"
-        else -> "Tie"
-    }
-    return when {
-        challenge.myScore > challenge.theirScore -> "You’re ahead"
-        challenge.theirScore > challenge.myScore -> "${challenge.opponentName} is ahead"
-        else -> "Tied"
-    }
 }
 
 @Composable
@@ -1271,7 +986,7 @@ private fun SettingsSheet(state: LittleSpudUiState, model: LittleSpudViewModel) 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Linked person", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "Choose who uses this Little Spud. Fitness and future personal features will use this Tater People identity.",
+                    "Choose who uses this Little Spud. Chat and future personal features will use this Tater People identity.",
                     style = MaterialTheme.typography.bodySmall,
                     color = SpudMuted,
                 )

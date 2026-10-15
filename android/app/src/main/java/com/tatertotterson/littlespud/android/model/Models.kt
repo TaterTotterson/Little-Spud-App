@@ -22,7 +22,7 @@ enum class ConnectionRoute(val wireName: String) {
     }
 }
 
-enum class LittleSpudLane { NOTIFICATIONS, CHAT, HOME, MUSIC, SAT_CHAT, CAMERAS, FITNESS }
+enum class LittleSpudLane { NOTIFICATIONS, CHAT, HOME, MUSIC, SAT_CHAT, CAMERAS }
 
 data class SatChatParticipant(
     val id: String,
@@ -445,47 +445,6 @@ data class MusicSnapshot(
     val syncedAt: Long? = null,
 )
 
-data class FitnessDay(
-    val date: String,
-    val steps: Int? = null,
-    val distanceMeters: Double? = null,
-    val activeEnergyKcal: Double? = null,
-    val exerciseMinutes: Double? = null,
-    val workouts: Int? = null,
-    val sleepMinutes: Double? = null,
-    val sleepCoreMinutes: Double? = null,
-    val sleepDeepMinutes: Double? = null,
-    val sleepRemMinutes: Double? = null,
-    val sleepAwakeMinutes: Double? = null,
-    val heartRateAverage: Double? = null,
-    val heartRateMinimum: Double? = null,
-    val heartRateMaximum: Double? = null,
-    val restingHeartRate: Double? = null,
-    val heartRateVariability: Double? = null,
-    val bloodPressureSystolic: Double? = null,
-    val bloodPressureDiastolic: Double? = null,
-    val oxygenSaturationPercent: Double? = null,
-    val respiratoryRate: Double? = null,
-    val weightKilograms: Double? = null,
-    val bodyFatPercent: Double? = null,
-)
-
-data class FitnessInsight(
-    val id: String,
-    val title: String,
-    val headline: String,
-    val detail: String,
-    val recordedDate: String,
-)
-
-data class FitnessChallengeType(
-    val id: String,
-    val title: String,
-    val unit: String,
-    val scoreKind: String,
-    val description: String,
-)
-
 data class PersonOption(
     val id: String,
     val name: String,
@@ -495,40 +454,6 @@ data class PersonSettings(
     val linkedPersonId: String = "",
     val linkedPersonName: String = "",
     val people: List<PersonOption> = emptyList(),
-)
-
-data class FitnessChallenge(
-    val id: String,
-    val state: String,
-    val duration: String,
-    val opponentId: String,
-    val opponentName: String,
-    val metric: String,
-    val metricTitle: String,
-    val unit: String,
-    val scoreKind: String,
-    val myScore: Double,
-    val theirScore: Double,
-    val startAt: Long? = null,
-    val endAt: Long? = null,
-    val incoming: Boolean = false,
-    val result: String = "",
-)
-
-data class FitnessSnapshot(
-    val available: Boolean = false,
-    val configured: Boolean = false,
-    val person: PersonOption? = null,
-    val challengePeople: List<PersonOption> = emptyList(),
-    val today: FitnessDay? = null,
-    val recentDays: List<FitnessDay> = emptyList(),
-    val summaryHeadline: String = "Fitness Core",
-    val summaryDetail: String = "Install and start Fitness Core in Tater to use private health sync.",
-    val insights: List<FitnessInsight> = emptyList(),
-    val challengeTypes: List<FitnessChallengeType> = emptyList(),
-    val challenges: List<FitnessChallenge> = emptyList(),
-    val lastSyncAt: Long? = null,
-    val privacyMessage: String = "Daily totals only; raw health samples stay on this phone.",
 )
 
 data class PushRegistration(

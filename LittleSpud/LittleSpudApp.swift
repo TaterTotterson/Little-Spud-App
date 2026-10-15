@@ -32,9 +32,6 @@ struct LittleSpudApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .littleSpudRemotePushRegistrationFailed)) { event in
                     model.handleRemotePushRegistrationFailure(event.object as? String)
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .littleSpudFitnessHealthChanged)) { _ in
-                    model.refreshFitness(syncHealth: false)
-                }
                 .onChange(of: scenePhase) { phase in
                     if phase == .active {
                         model.resume()
@@ -52,7 +49,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         LocalNotificationManager.shared.configure()
-        FitnessHealthStore.shared.startBackgroundObservers()
         configureFirebaseMessaging()
         return true
     }

@@ -47,7 +47,6 @@ import com.tatertotterson.littlespud.android.BuildConfig
 import com.tatertotterson.littlespud.android.data.ChatResponse
 import com.tatertotterson.littlespud.android.data.SpudLinkException
 import com.tatertotterson.littlespud.android.model.ConnectionRoute
-import com.tatertotterson.littlespud.android.model.FitnessSnapshot
 import com.tatertotterson.littlespud.android.model.HomeCategory
 import com.tatertotterson.littlespud.android.model.HomeSnapshot
 import com.tatertotterson.littlespud.android.model.HubActiveRun
@@ -69,7 +68,6 @@ import com.tatertotterson.littlespud.android.model.TemperatureUnitPreference
 import com.tatertotterson.littlespud.android.playback.MusicPlaybackService
 import com.tatertotterson.littlespud.android.playback.toMusicTrack
 import com.tatertotterson.littlespud.android.playback.toPlaybackMediaItem
-import com.tatertotterson.littlespud.android.fitness.FitnessSyncWorker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -93,7 +91,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
-import java.time.ZoneId
 import java.util.concurrent.Executors
 import kotlin.math.max
 
@@ -133,12 +130,6 @@ data class LittleSpudUiState(
     val musicTransportLoading: Boolean = false,
     val musicError: String = "",
     val musicQuery: String = "",
-    val fitness: FitnessSnapshot = FitnessSnapshot(),
-    val fitnessLoading: Boolean = false,
-    val fitnessError: String = "",
-    val fitnessCoreAvailable: Boolean = false,
-    val fitnessHealthAvailable: Boolean = false,
-    val fitnessHealthConnected: Boolean = false,
     val personSettings: PersonSettings = PersonSettings(),
     val personLinkLoading: Boolean = false,
     val personLinkError: String = "",
@@ -181,9 +172,6 @@ class LittleSpudViewModel(
             notificationUnreadCount = container.settings.notificationUnreadCount,
             ttsEnabled = container.settings.ttsEnabled,
             temperatureUnitPreference = container.settings.temperatureUnitPreference,
-            fitnessCoreAvailable = container.secureStore.loadSession()?.let(container.fitnessHealth::coreAvailable) ?: false,
-            fitnessHealthAvailable = container.fitnessHealth.isAvailable,
-            fitnessHealthConnected = container.settings.fitnessSyncEnabled,
         ),
     )
     val state: StateFlow<LittleSpudUiState> = _state.asStateFlow()
@@ -192,7 +180,6 @@ class LittleSpudViewModel(
     private var routeProbeJob: Job? = null
     private var homeJob: Job? = null
     private var musicJob: Job? = null
-    private var fitnessStateSyncJob: Job? = null
     private var musicStateSyncJob: Job? = null
     private var pushJob: Job? = null
     private var voiceCaptureJob: Job? = null
@@ -607,14 +594,6 @@ class LittleSpudViewModel(
             startMusicStateSync()
         } else if (_state.value.activeLane == LittleSpudLane.CAMERAS) {
             refreshHome()
-        } else if (_state.value.activeLane == LittleSpudLane.FITNESS) {
-            refreshFitness(syncHealth = true)
-        }
-        if (container.settings.fitnessSyncEnabled &&
-            _state.value.activeLane != LittleSpudLane.FITNESS &&
-            container.fitnessHealth.coreAvailable(session)
-        ) {
-            syncFitnessFromHealth()
         }
         syncPushRegistration()
     }
@@ -626,8 +605,6 @@ class LittleSpudViewModel(
         routeProbeJob?.cancel()
         routeProbeJob = null
         stopMusicStateSync()
-        fitnessStateSyncJob?.cancel()
-        fitnessStateSyncJob = null
         if (_state.value.isVoiceRecording || _state.value.isVoiceSubmitting) cancelVoiceInput()
         if (satChatSocket != null) stopSatChatMedia(closeSocket = true)
     }
@@ -635,10 +612,6 @@ class LittleSpudViewModel(
     fun selectLane(lane: LittleSpudLane) {
         _state.update { it.copy(activeLane = lane, showSettings = false) }
         if (lane != LittleSpudLane.MUSIC) stopMusicStateSync()
-        if (lane != LittleSpudLane.FITNESS) {
-            fitnessStateSyncJob?.cancel()
-            fitnessStateSyncJob = null
-        }
         when (lane) {
             LittleSpudLane.NOTIFICATIONS -> markNotificationsRead()
             LittleSpudLane.HOME -> refreshHome()
@@ -648,215 +621,8 @@ class LittleSpudViewModel(
             }
             LittleSpudLane.SAT_CHAT -> refreshSatChat()
             LittleSpudLane.CAMERAS -> refreshHome()
-            LittleSpudLane.FITNESS -> {
-                refreshFitness(syncHealth = true)
-            }
             LittleSpudLane.CHAT -> Unit
         }
-    }
-
-    fun fitnessPermissions(): Set<String> = container.fitnessHealth.requiredPermissions
-
-    fun finishFitnessPermissionRequest(granted: Set<String>) {
-        viewModelScope.launch {
-            val effectivePermissions = granted + runCatching {
-                container.fitnessHealth.grantedPermissions()
-            }.getOrDefault(emptySet())
-            val connected = container.fitnessHealth.hasReadAccess(effectivePermissions)
-            container.settings.fitnessSyncEnabled = connected
-            _state.update {
-                it.copy(
-                    fitnessHealthConnected = connected,
-                    fitnessError = "",
-                )
-            }
-            if (connected) {
-                syncFitnessFromHealth(showStatus = true)
-            } else {
-                refreshFitness(syncHealth = false)
-                _state.update {
-                    it.copy(
-                        fitnessError = "Health Connect access was not granted. Tap Connect Health Connect to try again.",
-                    )
-                }
-            }
-        }
-    }
-
-    fun refreshFitness(syncHealth: Boolean = false) {
-        val session = _state.value.session ?: return
-        if (session.isDemo) {
-            _state.update { it.copy(fitnessError = "Pair with Tater and install Fitness Core to use health sync.") }
-            return
-        }
-        if (syncHealth && _state.value.fitnessHealthConnected) {
-            syncFitnessFromHealth()
-            return
-        }
-        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
-        viewModelScope.launch {
-            runCatching { container.api.fetchFitness(session, refresh = true) }
-                .onSuccess { snapshot ->
-                    container.fitnessHealth.setCoreAvailable(true, session)
-                    _state.update {
-                        it.copy(fitness = snapshot, fitnessLoading = false, fitnessCoreAvailable = true)
-                    }
-                    if (_state.value.activeLane == LittleSpudLane.FITNESS) startFitnessStateSync()
-                }
-                .onFailure { error ->
-                    if (isFitnessCoreUnavailable(error)) {
-                        container.fitnessHealth.setCoreAvailable(false, session)
-                        FitnessSyncWorker.cancel(getApplication())
-                        fitnessStateSyncJob?.cancel()
-                        fitnessStateSyncJob = null
-                        _state.update { it.copy(fitnessCoreAvailable = false) }
-                    }
-                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
-                }
-        }
-    }
-
-    fun syncFitnessFromHealth(showStatus: Boolean = false) {
-        val session = _state.value.session ?: return
-        if (session.isDemo) return
-        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
-        viewModelScope.launch {
-            val availableSnapshot = runCatching { container.api.fetchFitness(session, refresh = true) }
-                .getOrElse { error ->
-                    if (isFitnessCoreUnavailable(error)) {
-                        container.fitnessHealth.setCoreAvailable(false, session)
-                        FitnessSyncWorker.cancel(getApplication())
-                        fitnessStateSyncJob?.cancel()
-                        fitnessStateSyncJob = null
-                        _state.update { it.copy(fitnessCoreAvailable = false) }
-                    }
-                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
-                    return@launch
-                }
-            container.fitnessHealth.setCoreAvailable(true, session)
-            _state.update { it.copy(fitnessCoreAvailable = true) }
-            if (_state.value.activeLane == LittleSpudLane.FITNESS) startFitnessStateSync()
-            val granted = runCatching { container.fitnessHealth.grantedPermissions() }
-                .getOrElse { error ->
-                    container.settings.fitnessSyncEnabled = false
-                    _state.update {
-                        it.copy(
-                            fitnessLoading = false,
-                            fitnessHealthConnected = false,
-                            fitnessError = if (container.fitnessHealth.isAvailable) fitnessError(error) else "",
-                        )
-                    }
-                    return@launch
-                }
-            if (!container.fitnessHealth.hasReadAccess(granted)) {
-                container.settings.fitnessSyncEnabled = false
-                _state.update {
-                    it.copy(
-                        fitnessHealthConnected = false,
-                        fitnessError = "",
-                    )
-                }
-                refreshFitnessFromTater(session)
-                return@launch
-            }
-
-            container.settings.fitnessSyncEnabled = true
-            FitnessSyncWorker.schedule(getApplication())
-            _state.update { it.copy(fitnessHealthConnected = true) }
-            runCatching {
-                val plan = container.fitnessHealth.pendingDailyTotals(session)
-                val snapshot = if (plan.days.isEmpty()) {
-                    availableSnapshot
-                } else {
-                    container.api.syncFitness(
-                        session = session,
-                        platform = "android-health-connect",
-                        timeZone = ZoneId.systemDefault().id,
-                        permissions = container.fitnessHealth.grantedPermissions(),
-                        days = plan.days,
-                    )
-                }
-                container.fitnessHealth.markDailyTotalsSynced(plan, session)
-                snapshot
-            }.onSuccess { snapshot ->
-                container.fitnessHealth.setCoreAvailable(true, session)
-                _state.update {
-                    it.copy(
-                        fitness = snapshot,
-                        fitnessLoading = false,
-                        fitnessCoreAvailable = true,
-                        fitnessHealthConnected = true,
-                        statusText = if (showStatus) "Fitness totals synced privately with Tater." else it.statusText,
-                    )
-                }
-            }.onFailure { error ->
-                if (isFitnessCoreUnavailable(error)) {
-                    container.fitnessHealth.setCoreAvailable(false, session)
-                    FitnessSyncWorker.cancel(getApplication())
-                    fitnessStateSyncJob?.cancel()
-                    fitnessStateSyncJob = null
-                    _state.update {
-                        it.copy(
-                            fitnessLoading = false,
-                            fitnessCoreAvailable = false,
-                            fitnessError = fitnessError(error),
-                        )
-                    }
-                } else if (isFitnessPermissionError(error)) {
-                    container.settings.fitnessSyncEnabled = false
-                    _state.update {
-                        it.copy(
-                            fitnessHealthConnected = false,
-                            fitnessError = "",
-                        )
-                    }
-                    refreshFitnessFromTater(session)
-                } else {
-                    _state.update { it.copy(fitnessLoading = false, fitnessError = fitnessError(error)) }
-                }
-            }
-        }
-    }
-
-    private suspend fun refreshFitnessFromTater(session: LittleSpudSession) {
-        runCatching { container.api.fetchFitness(session, refresh = true) }
-            .onSuccess { snapshot ->
-                container.fitnessHealth.setCoreAvailable(true, session)
-                _state.update {
-                    it.copy(
-                        fitness = snapshot,
-                        fitnessLoading = false,
-                        fitnessCoreAvailable = true,
-                        fitnessError = "",
-                    )
-                }
-            }
-            .onFailure { error ->
-                if (isFitnessCoreUnavailable(error)) {
-                    container.fitnessHealth.setCoreAvailable(false, session)
-                    FitnessSyncWorker.cancel(getApplication())
-                }
-                _state.update {
-                    it.copy(
-                        fitnessLoading = false,
-                        fitnessCoreAvailable = if (isFitnessCoreUnavailable(error)) false else it.fitnessCoreAvailable,
-                        fitnessError = fitnessError(error),
-                    )
-                }
-            }
-    }
-
-    private fun isFitnessPermissionError(error: Throwable): Boolean {
-        if (error is SecurityException) return true
-        val message = error.message.orEmpty()
-        return message.contains("Health Connect", ignoreCase = true) &&
-            (message.contains("permission", ignoreCase = true) || message.contains("access", ignoreCase = true))
-    }
-
-    private fun isFitnessCoreUnavailable(error: Throwable): Boolean {
-        val status = (error as? SpudLinkException)?.statusCode
-        return (status == 404 || status == 409) &&
-            !error.message.orEmpty().contains("link little spud", ignoreCase = true)
     }
 
     fun refreshPersonSettings() {
@@ -879,7 +645,6 @@ class LittleSpudViewModel(
         viewModelScope.launch {
             runCatching { container.api.saveLinkedPerson(session, personId) }
                 .onSuccess { settings ->
-                    container.fitnessHealth.resetSyncHistory(session)
                     _state.update {
                         it.copy(
                             personSettings = settings,
@@ -887,96 +652,10 @@ class LittleSpudViewModel(
                             statusText = "Little Spud is linked to ${settings.linkedPersonName}.",
                         )
                     }
-                    refreshFitness(syncHealth = _state.value.fitnessHealthConnected)
                 }
                 .onFailure { error ->
                     _state.update { it.copy(personLinkLoading = false, personLinkError = friendlyError(error)) }
                 }
-        }
-    }
-
-    fun runFitnessChallenge(
-        action: String,
-        personId: String = "",
-        challengeId: String = "",
-        duration: String = "day",
-        metric: String = "steps",
-    ) {
-        val session = _state.value.session ?: return
-        _state.update { it.copy(fitnessLoading = true, fitnessError = "") }
-        viewModelScope.launch {
-            runCatching {
-                container.api.runFitnessChallenge(
-                    session = session,
-                    action = action,
-                    personId = personId,
-                    challengeId = challengeId,
-                    duration = duration,
-                    metric = metric,
-                    value = currentFitnessChallengeValue(metric),
-                )
-            }.onSuccess { snapshot -> _state.update { it.copy(fitness = snapshot, fitnessLoading = false) } }
-                .onFailure { error -> _state.update { it.copy(fitnessLoading = false, fitnessError = friendlyError(error)) } }
-        }
-    }
-
-    private fun currentFitnessChallengeValue(metric: String): Double? {
-        val today = _state.value.fitness.today ?: return null
-        return when (metric) {
-            "steps" -> today.steps?.toDouble()
-            "distance_m" -> today.distanceMeters
-            "exercise_minutes" -> today.exerciseMinutes
-            "workouts" -> today.workouts?.toDouble()
-            "active_energy_kcal" -> today.activeEnergyKcal
-            "weight_checkins" -> today.weightKilograms?.let { 1.0 }
-            else -> null
-        }
-    }
-
-    private fun fitnessError(error: Throwable): String {
-        val status = (error as? SpudLinkException)?.statusCode
-        val message = friendlyError(error)
-        return if (status == 409 && message.contains("link little spud", ignoreCase = true)) message
-        else if (status == 404 || status == 409) "Install and start Fitness Core from Tater Shop."
-        else message
-    }
-
-    private fun startFitnessStateSync() {
-        fitnessStateSyncJob?.cancel()
-        val currentSession = _state.value.session
-        if (currentSession == null || !container.fitnessHealth.coreAvailable(currentSession)) {
-            fitnessStateSyncJob = null
-            return
-        }
-        fitnessStateSyncJob = viewModelScope.launch {
-            var tick = 0
-            while (isActive && _state.value.activeLane == LittleSpudLane.FITNESS) {
-                delay(15_000)
-                val session = _state.value.session ?: break
-                tick += 1
-                if (tick % 20 == 0 && container.settings.fitnessSyncEnabled && _state.value.fitness.challenges.any { it.state == "active" }) {
-                    syncFitnessFromHealth()
-                } else {
-                    runCatching { container.api.fetchFitness(session, refresh = true) }
-                        .onSuccess { snapshot ->
-                            container.fitnessHealth.setCoreAvailable(true, session)
-                            _state.update { it.copy(fitness = snapshot, fitnessCoreAvailable = true) }
-                        }
-                        .onFailure { error ->
-                            if (isFitnessCoreUnavailable(error)) {
-                                container.fitnessHealth.setCoreAvailable(false, session)
-                                FitnessSyncWorker.cancel(getApplication())
-                                _state.update {
-                                    it.copy(
-                                        fitnessCoreAvailable = false,
-                                        fitnessError = fitnessError(error),
-                                    )
-                                }
-                                return@launch
-                            }
-                        }
-                }
-            }
         }
     }
 

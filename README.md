@@ -11,7 +11,7 @@
 
 # Little Spud
 
-Little Spud is the native iOS and Android companion app for a user-controlled, self-hosted [Tater](https://taterassistant.com) instance. Both apps use the same SpudLink API for secure pairing, chat, voice, home controls, Sat Chat, cameras, Music Core, private Fitness Core features, and device notifications.
+Little Spud is the native iOS and Android companion app for a user-controlled, self-hosted [Tater](https://taterassistant.com) instance. Both apps use the same SpudLink API for secure pairing, chat, voice, home controls, Sat Chat, cameras, Music Core, and device notifications.
 
 Device notifications use Firebase Cloud Messaging and Apple Push Notification service to wake the app with a generic Little Spud alert. The real notification content stays in the paired Tater instance and is fetched by the app or notification service extension when possible.
 
@@ -37,7 +37,6 @@ Device notifications use Firebase Cloud Messaging and Apple Push Notification se
 - Music Core browsing, search, playlists, album-art caching, synchronized playback targets and volume, and playback directly on the phone.
 - Instant audio and video Sat Chat with compatible Tater satellites, including capability-aware participant status.
 - Integration-neutral live camera and doorbell viewing through the paired Tater, with supported two-way audio controls.
-- Optional Apple Health and Health Connect synchronization to a private Fitness Core, with daily wellness summaries, metric insights, and opt-in challenges between linked people.
 - Background notification wake-ups that fetch private alert content directly from the paired Tater instance.
 
 ## Build

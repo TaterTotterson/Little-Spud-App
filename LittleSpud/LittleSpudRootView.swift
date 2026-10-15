@@ -176,8 +176,6 @@ private struct ChatView: View {
             SatChatView()
         case .cameras:
             CamerasView()
-        case .fitness:
-            FitnessView()
         }
     }
 
@@ -267,17 +265,6 @@ private struct ChatHeader: View {
                 .buttonStyle(SecondaryIconButtonStyle())
                 .disabled(model.musicLoading)
                 .accessibilityLabel("Refresh music")
-            } else if model.activeLane == .fitness {
-                Button { model.refreshFitness(syncHealth: true) } label: {
-                    Group {
-                        if model.fitnessLoading { ProgressView().tint(AppTheme.text) }
-                        else { Image(systemName: "arrow.clockwise") }
-                    }
-                    .frame(width: 36, height: 36)
-                }
-                .buttonStyle(SecondaryIconButtonStyle())
-                .disabled(model.fitnessLoading)
-                .accessibilityLabel("Refresh fitness")
             } else {
                 Button {
                     model.toggleTTS()
@@ -325,7 +312,7 @@ private struct AppNavigationDrawer: View {
     let onSelect: (LittleSpudLane) -> Void
     let onClose: () -> Void
 
-    private let lanes: [LittleSpudLane] = [.home, .chat, .satChat, .music, .cameras, .fitness, .notifications]
+    private let lanes: [LittleSpudLane] = [.home, .chat, .satChat, .music, .cameras, .notifications]
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -445,8 +432,6 @@ private struct AppNavigationDrawer: View {
             return "Sat Chat"
         case .cameras:
             return "Cameras"
-        case .fitness:
-            return "Fitness"
         }
     }
 
@@ -464,327 +449,6 @@ private struct AppNavigationDrawer: View {
             return "mic.and.signal.meter.fill"
         case .cameras:
             return "video.fill"
-        case .fitness:
-            return "figure.run"
-        }
-    }
-}
-
-private struct FitnessView: View {
-    @EnvironmentObject private var model: LittleSpudViewModel
-    @State private var section = "overview"
-    @State private var opponentPersonID = ""
-    @State private var duration = "day"
-    @State private var challengeMetric = "steps"
-
-    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
-
-    @ViewBuilder
-    var body: some View {
-        if !model.fitnessCoreAvailable {
-            VStack(spacing: 16) {
-                if model.fitnessLoading {
-                    ProgressView()
-                        .tint(AppTheme.accent)
-                } else {
-                    Label(
-                        model.fitnessError.isEmpty
-                            ? "Install and start Fitness Core from Tater Shop."
-                            : model.fitnessError,
-                        systemImage: "heart.text.square.fill"
-                    )
-                    .font(.headline)
-                    .foregroundStyle(AppTheme.muted)
-                    .multilineTextAlignment(.center)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(24)
-            .background(AppTheme.background)
-        } else {
-            ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Picker("Fitness section", selection: $section) {
-                    Text("Overview").tag("overview")
-                    Text("Challenges").tag("challenges")
-                }
-                .pickerStyle(.segmented)
-
-                if !model.fitnessError.isEmpty {
-                    Label(model.fitnessError, systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(AppTheme.danger)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(AppTheme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
-                }
-
-                if model.fitnessCoreAvailable && !model.fitnessHealthConnected {
-                    fitnessPanel {
-                        Label("Connect Apple Health", systemImage: "heart.text.square.fill")
-                            .font(.title3.bold())
-                        Text("Little Spud reads the totals you approve and sends daily aggregates to your own Tater. Raw samples stay on this phone.")
-                            .foregroundStyle(AppTheme.muted)
-                        Button("Connect Apple Health") { model.connectFitnessHealth() }
-                            .buttonStyle(.borderedProminent)
-                            .tint(AppTheme.accent)
-                            .disabled(!model.fitnessHealthAvailable || model.fitnessLoading)
-                    }
-                }
-
-                if section == "overview" { overview }
-                else { challenges }
-
-                Text(model.fitnessSnapshot.privacyMessage)
-                    .font(.caption)
-                    .foregroundStyle(AppTheme.muted)
-                    .padding(.horizontal, 4)
-            }
-            .padding(16)
-        }
-        .background(AppTheme.background)
-        .onChange(of: model.fitnessSnapshot.challengePeople) { people in
-            if !people.contains(where: { $0.id == opponentPersonID }) {
-                opponentPersonID = ""
-            }
-        }
-        .onChange(of: model.fitnessSnapshot.challengeTypes) { types in
-            if !types.contains(where: { $0.id == challengeMetric }) {
-                challengeMetric = types.first?.id ?? "steps"
-            }
-        }
-        .onChange(of: challengeMetric) { metric in
-            if metric == "weight_checkins", duration == "3_hours" { duration = "day" }
-        }
-        }
-    }
-
-    @ViewBuilder private var overview: some View {
-        fitnessPanel {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(model.fitnessSnapshot.summaryHeadline).font(.title2.bold())
-                    Text(model.fitnessSnapshot.summaryDetail).foregroundStyle(AppTheme.muted)
-                    Text("Informational only · not medical advice")
-                        .font(.caption2.bold())
-                        .foregroundStyle(AppTheme.accent2)
-                }
-                Spacer()
-                Image(systemName: "heart.text.square.fill")
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(AppTheme.accent2)
-            }
-            if let today = model.fitnessSnapshot.today {
-                LazyVGrid(columns: columns, spacing: 10) {
-                    if let value = today.steps { metric("Steps", value: formatted(value), icon: "shoeprints.fill") }
-                    if let value = today.sleepMinutes { metric("Sleep", value: sleep(value), icon: "bed.double.fill") }
-                    if let value = today.heartRateAverage { metric("Heart rate", value: "\(Int(value.rounded())) bpm", icon: "heart.fill") }
-                    if let systolic = today.bloodPressureSystolic, let diastolic = today.bloodPressureDiastolic {
-                        metric("Blood pressure", value: "\(Int(systolic.rounded()))/\(Int(diastolic.rounded()))", icon: "waveform.path.ecg")
-                    }
-                    if let value = today.weightKilograms { metric("Weight", value: String(format: "%.1f kg", value), icon: "scalemass.fill") }
-                    if let value = today.activeEnergyKcal { metric("Active energy", value: "\(Int(value.rounded())) kcal", icon: "flame.fill") }
-                }
-            }
-        }
-
-        ForEach(model.fitnessSnapshot.insights) { insight in
-            fitnessPanel {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: insightIcon(insight.id))
-                        .font(.title2)
-                        .foregroundStyle(AppTheme.accent2)
-                        .frame(width: 30)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(insight.title).font(.headline)
-                        Text(insight.headline).font(.title3.bold())
-                        Text(insight.detail).foregroundStyle(AppTheme.muted)
-                        if !insight.recordedDate.isEmpty {
-                            Text("Recorded \(insight.recordedDate)")
-                                .font(.caption2)
-                                .foregroundStyle(AppTheme.muted)
-                        }
-                    }
-                }
-            }
-        }
-
-        let stepDays = model.fitnessSnapshot.recentDays.prefix(7).filter { $0.steps != nil }
-        if !stepDays.isEmpty {
-            fitnessPanel {
-                Text("Recent steps").font(.headline)
-                HStack(alignment: .bottom, spacing: 7) {
-                    ForEach(Array(stepDays.reversed())) { day in
-                        VStack(spacing: 5) {
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(AppTheme.accent)
-                                .frame(height: max(5, min(100, CGFloat(day.steps ?? 0) / 100)))
-                            Text(day.date.suffix(2)).font(.caption2).foregroundStyle(AppTheme.muted)
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                }
-                .frame(height: 125, alignment: .bottom)
-            }
-        }
-    }
-
-    @ViewBuilder private var challenges: some View {
-        if model.fitnessSnapshot.configured {
-            fitnessPanel {
-                Text("Start a challenge").font(.headline)
-                if let person = model.fitnessSnapshot.person {
-                    Label("Fitness data belongs to \(person.name)", systemImage: "person.crop.circle.badge.checkmark")
-                        .font(.subheadline)
-                        .foregroundStyle(AppTheme.muted)
-                }
-                Picker("Type", selection: $challengeMetric) {
-                    ForEach(model.fitnessSnapshot.challengeTypes) { type in Text(type.title).tag(type.id) }
-                }
-                .pickerStyle(.menu)
-                if let selected = model.fitnessSnapshot.challengeTypes.first(where: { $0.id == challengeMetric }),
-                   !selected.description.isEmpty {
-                    Text(selected.description).font(.caption).foregroundStyle(AppTheme.muted)
-                }
-                Picker("Person", selection: $opponentPersonID) {
-                    Text("Choose a person").tag("")
-                    ForEach(model.fitnessSnapshot.challengePeople) { person in Text(person.name).tag(person.id) }
-                }
-                .pickerStyle(.menu)
-                Picker("Length", selection: $duration) {
-                    if challengeMetric != "weight_checkins" { Text("3 hours").tag("3_hours") }
-                    Text("1 day").tag("day")
-                    Text("1 week").tag("week")
-                }
-                .pickerStyle(.segmented)
-                Button("Send challenge") {
-                    model.runFitnessChallenge(
-                        action: "create",
-                        personID: opponentPersonID,
-                        duration: duration,
-                        metric: challengeMetric
-                    )
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.accent)
-                .disabled(opponentPersonID.isEmpty || model.fitnessLoading)
-            }
-        }
-
-        if model.fitnessSnapshot.challenges.isEmpty {
-            fitnessPanel {
-                Label("No challenges yet", systemImage: "trophy.fill").font(.headline)
-                Text("Create more than one challenge and track each result here.").foregroundStyle(AppTheme.muted)
-            }
-        } else {
-            ForEach(model.fitnessSnapshot.challenges) { challenge in
-                fitnessPanel {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(challenge.metricTitle).font(.headline)
-                            Text("\(challenge.opponentName) · \(challenge.duration.replacingOccurrences(of: "_", with: " "))")
-                                .font(.caption).foregroundStyle(AppTheme.muted)
-                        }
-                        Spacer()
-                        Text(challenge.state.capitalized)
-                            .font(.caption.bold())
-                            .foregroundStyle(challenge.state == "active" ? AppTheme.green : AppTheme.accent2)
-                    }
-                    if challenge.state == "active" || challenge.state == "completed" {
-                        HStack {
-                            score("You", challenge.myScore, unit: challenge.unit)
-                            Spacer()
-                            Text("VS").font(.caption.bold()).foregroundStyle(AppTheme.muted)
-                            Spacer()
-                            score(challenge.opponentName, challenge.theirScore, unit: challenge.unit)
-                        }
-                        Text(challengeStanding(challenge))
-                            .font(.subheadline.bold())
-                            .foregroundStyle(challengeStandingColor(challenge))
-                    }
-                    if challenge.incoming {
-                        HStack {
-                            Button("Accept") {
-                                model.runFitnessChallenge(action: "accept", challengeID: challenge.id, metric: challenge.metric)
-                            }
-                            .buttonStyle(.borderedProminent).tint(AppTheme.green)
-                            Button("Decline") {
-                                model.runFitnessChallenge(action: "decline", challengeID: challenge.id, metric: challenge.metric)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private func fitnessPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12, content: content)
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppTheme.line, lineWidth: 1))
-    }
-
-    private func metric(_ title: String, value: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(AppTheme.accent2).frame(width: 22)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(value).font(.headline)
-                Text(title).font(.caption).foregroundStyle(AppTheme.muted)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(AppTheme.panelRaised, in: RoundedRectangle(cornerRadius: 13))
-    }
-
-    private func score(_ name: String, _ value: Double, unit: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(scoreText(value, unit: unit)).font(.title3.bold())
-            Text(name).font(.caption).foregroundStyle(AppTheme.muted).lineLimit(1)
-        }
-    }
-
-    private func formatted(_ value: Int) -> String { value.formatted() }
-    private func distance(_ meters: Double) -> String {
-        Locale.current.measurementSystem == .metric
-            ? String(format: "%.1f km", meters / 1000)
-            : String(format: "%.1f mi", meters / 1609.344)
-    }
-    private func sleep(_ minutes: Double) -> String {
-        "\(Int(minutes) / 60)h \(Int(minutes) % 60)m"
-    }
-    private func scoreText(_ value: Double, unit: String) -> String {
-        if unit == "m" { return distance(value) }
-        let number = value.rounded() == value ? formatted(Int(value)) : String(format: "%.1f", value)
-        return "\(number) \(unit)"
-    }
-    private func challengeStanding(_ challenge: LittleSpudFitnessChallenge) -> String {
-        if challenge.state == "completed" {
-            if challenge.result == "won" { return "You won" }
-            if challenge.result == "lost" { return "\(challenge.opponentName) won" }
-            return "Tie"
-        }
-        if challenge.myScore > challenge.theirScore { return "You’re ahead" }
-        if challenge.theirScore > challenge.myScore { return "\(challenge.opponentName) is ahead" }
-        return "Tied"
-    }
-    private func challengeStandingColor(_ challenge: LittleSpudFitnessChallenge) -> Color {
-        if challenge.state == "completed", challenge.result == "lost" { return AppTheme.muted }
-        if challenge.state == "completed", challenge.result == "tie" { return AppTheme.accent2 }
-        return challenge.myScore >= challenge.theirScore ? AppTheme.green : AppTheme.accent2
-    }
-    private func insightIcon(_ id: String) -> String {
-        switch id {
-        case "steps", "activity": return "figure.walk.motion"
-        case "sleep": return "bed.double.fill"
-        case "heart_rate", "resting_heart_rate", "heart_rate_variability": return "heart.fill"
-        case "blood_pressure": return "waveform.path.ecg"
-        case "blood_oxygen", "respiratory_rate": return "lungs.fill"
-        case "weight", "body_fat": return "scalemass.fill"
-        default: return "chart.line.uptrend.xyaxis"
         }
     }
 }
@@ -817,7 +481,7 @@ private struct LittleSpudSettingsView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Linked person", systemImage: "person.crop.circle.badge.checkmark")
                             .font(.headline)
-                        Text("Choose who uses this Little Spud. Fitness and future personal features will use this Tater People identity.")
+                        Text("Choose who uses this Little Spud. Chat and future personal features will use this Tater People identity.")
                             .font(.subheadline)
                             .foregroundStyle(AppTheme.muted)
                         if model.personSettings.people.isEmpty {
@@ -1065,8 +729,6 @@ private struct HeaderStatus: View {
             return "Sat Chat"
         case .cameras:
             return "Cameras"
-        case .fitness:
-            return "Fitness"
         case .chat:
             return model.assistantDisplayName
         }

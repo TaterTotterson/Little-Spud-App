@@ -93,9 +93,6 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
-    implementation("androidx.health.connect:connect-client:1.1.0")
-    implementation("androidx.work:work-runtime-ktx:2.12.0")
-
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:5.1.0")

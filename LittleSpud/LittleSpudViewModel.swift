@@ -264,12 +264,6 @@ final class LittleSpudViewModel: ObservableObject {
     @Published var musicLoading = false
     @Published private(set) var musicTransportLoading = false
     @Published var musicError = ""
-    @Published var fitnessSnapshot: LittleSpudFitnessSnapshot = .empty
-    @Published var fitnessLoading = false
-    @Published var fitnessError = ""
-    @Published var fitnessCoreAvailable = false
-    @Published var fitnessHealthConnected = FitnessHealthStore.shared.syncEnabled
-    @Published var fitnessHealthAvailable = FitnessHealthStore.shared.isAvailable
     @Published var personSettings: LittleSpudPersonSettings = .empty
     @Published var personLinkLoading = false
     @Published var personLinkError = ""
@@ -294,10 +288,6 @@ final class LittleSpudViewModel: ObservableObject {
             if activeLane != .music {
                 stopMusicStateSync()
             }
-            if activeLane != .fitness {
-                fitnessStateSyncTask?.cancel()
-                fitnessStateSyncTask = nil
-            }
             if activeLane == .notifications {
                 markNotificationsRead()
             } else if activeLane == .home || activeLane == .cameras {
@@ -307,8 +297,6 @@ final class LittleSpudViewModel: ObservableObject {
                 startMusicStateSync()
             } else if activeLane == .satChat {
                 refreshSatChat()
-            } else if activeLane == .fitness {
-                refreshFitness(syncHealth: true)
             }
         }
     }
@@ -486,8 +474,6 @@ final class LittleSpudViewModel: ObservableObject {
     private var lastStreamHapticByMessageId: [String: Date] = [:]
     private var homeTask: Task<Void, Never>?
     private var musicTask: Task<Void, Never>?
-    private var fitnessTask: Task<Void, Never>?
-    private var fitnessStateSyncTask: Task<Void, Never>?
     private var musicStateSyncTask: Task<Void, Never>?
     private var musicProgressTask: Task<Void, Never>?
     private var localMusicContinuationTask: Task<Void, Never>?
@@ -558,15 +544,8 @@ final class LittleSpudViewModel: ObservableObject {
             startMusicStateSync()
         } else if activeLane == .satChat {
             refreshSatChat()
-        } else if activeLane == .fitness {
-            refreshFitness(syncHealth: true)
         }
         syncRemotePushRegistrationIfPossible()
-        if FitnessHealthStore.shared.syncEnabled,
-           activeLane != .fitness,
-           FitnessHealthStore.shared.coreAvailable(session: currentSession) {
-            syncFitnessFromHealth(showStatus: false)
-        }
         Task { [weak self] in
             await self?.refreshFromHub(showStatus: false)
         }
@@ -576,8 +555,6 @@ final class LittleSpudViewModel: ObservableObject {
         routeProbeTask?.cancel()
         routeProbeTask = nil
         stopMusicStateSync()
-        fitnessStateSyncTask?.cancel()
-        fitnessStateSyncTask = nil
         demoVoiceTask?.cancel()
         demoVoiceTask = nil
         cancelVoiceInput()
@@ -1396,129 +1373,6 @@ final class LittleSpudViewModel: ObservableObject {
         }
     }
 
-    func refreshFitness(syncHealth: Bool = false) {
-        guard let currentSession = session else { return }
-        if currentSession.isDemo {
-            fitnessSnapshot = .empty
-            fitnessError = "Pair with Tater and install Fitness Core to use health sync."
-            return
-        }
-        if syncHealth, fitnessHealthConnected {
-            syncFitnessFromHealth(showStatus: false)
-            return
-        }
-        fitnessTask?.cancel()
-        fitnessLoading = true
-        fitnessError = ""
-        fitnessTask = Task { [weak self] in
-            guard let self else { return }
-            defer { self.fitnessLoading = false; self.fitnessTask = nil }
-            do {
-                self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
-                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
-                self.fitnessCoreAvailable = true
-                self.fitnessError = ""
-                if self.activeLane == .fitness { self.startFitnessStateSync() }
-            } catch {
-                guard !Task.isCancelled else { return }
-                if FitnessHealthStore.isCoreUnavailable(error) {
-                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
-                    self.fitnessCoreAvailable = false
-                    self.fitnessStateSyncTask?.cancel()
-                    self.fitnessStateSyncTask = nil
-                }
-                self.fitnessError = self.friendlyFitnessError(error)
-            }
-        }
-    }
-
-    func connectFitnessHealth() {
-        guard let currentSession = session, !currentSession.isDemo else { return }
-        guard fitnessHealthAvailable else {
-            fitnessError = "Apple Health is not available on this device."
-            return
-        }
-        fitnessLoading = true
-        fitnessError = ""
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try await self.api.fetchFitness(session: currentSession, refresh: false)
-                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
-                self.fitnessCoreAvailable = true
-                try await FitnessHealthStore.shared.requestAccess()
-                self.fitnessHealthConnected = true
-                self.syncFitnessFromHealth(showStatus: true)
-            } catch {
-                if FitnessHealthStore.isCoreUnavailable(error) {
-                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
-                    self.fitnessCoreAvailable = false
-                }
-                self.fitnessLoading = false
-                self.fitnessError = self.friendlyFitnessError(error)
-            }
-        }
-    }
-
-    func syncFitnessFromHealth(showStatus: Bool = false) {
-        guard let currentSession = session,
-              !currentSession.isDemo,
-              FitnessHealthStore.shared.syncEnabled else { return }
-        fitnessTask?.cancel()
-        fitnessLoading = true
-        fitnessError = ""
-        fitnessTask = Task { [weak self] in
-            guard let self else { return }
-            defer { self.fitnessLoading = false; self.fitnessTask = nil }
-            do {
-                let availableSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
-                FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
-                self.fitnessCoreAvailable = true
-                if self.activeLane == .fitness { self.startFitnessStateSync() }
-                let canReadHealth = try await FitnessHealthStore.shared.prepareForSync(requestIfNeeded: true)
-                guard canReadHealth else {
-                    self.fitnessSnapshot = availableSnapshot
-                    self.fitnessError = ""
-                    return
-                }
-                let plan = try await FitnessHealthStore.shared.pendingDailyTotals(session: currentSession)
-                if plan.days.isEmpty {
-                    self.fitnessSnapshot = availableSnapshot
-                } else {
-                    self.fitnessSnapshot = try await self.api.syncFitness(
-                        session: currentSession,
-                        platform: "ios-healthkit",
-                        timeZone: TimeZone.autoupdatingCurrent.identifier,
-                        permissions: FitnessHealthStore.permissionNames,
-                        days: plan.days
-                    )
-                }
-                FitnessHealthStore.shared.markDailyTotalsSynced(plan, session: currentSession)
-                self.fitnessHealthConnected = true
-                self.fitnessError = ""
-                if showStatus { self.statusText = "Fitness totals synced privately with Tater." }
-            } catch {
-                guard !Task.isCancelled else { return }
-                if FitnessHealthStore.isCoreUnavailable(error) {
-                    FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
-                    self.fitnessCoreAvailable = false
-                    self.fitnessStateSyncTask?.cancel()
-                    self.fitnessStateSyncTask = nil
-                }
-                if FitnessHealthStore.shared.isAuthorizationPending(error) {
-                    do {
-                        self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
-                        self.fitnessError = ""
-                    } catch {
-                        self.fitnessError = self.friendlyFitnessError(error)
-                    }
-                    return
-                }
-                self.fitnessError = self.friendlyFitnessError(error)
-            }
-        }
-    }
-
     func refreshPersonSettings() {
         guard let currentSession = session else { return }
         guard !currentSession.isDemo else { return }
@@ -1542,98 +1396,8 @@ final class LittleSpudViewModel: ObservableObject {
             defer { self.personLinkLoading = false }
             do {
                 self.personSettings = try await self.api.saveLinkedPerson(session: currentSession, personID: personID)
-                FitnessHealthStore.shared.resetSyncHistory(session: currentSession)
                 self.statusText = "Little Spud is linked to \(self.personSettings.linkedPersonName)."
-                self.refreshFitness(syncHealth: self.fitnessHealthConnected)
             } catch { self.personLinkError = error.localizedDescription }
-        }
-    }
-
-    func runFitnessChallenge(
-        action: String,
-        personID: String = "",
-        challengeID: String = "",
-        duration: String = "day",
-        metric: String = "steps"
-    ) {
-        guard let currentSession = session else { return }
-        fitnessLoading = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.fitnessLoading = false }
-            do {
-                self.fitnessSnapshot = try await self.api.runFitnessChallenge(
-                    session: currentSession,
-                    action: action,
-                    personID: personID,
-                    challengeID: challengeID,
-                    duration: duration,
-                    metric: metric,
-                    value: self.currentFitnessChallengeValue(metric: metric)
-                )
-                self.fitnessError = ""
-            } catch { self.fitnessError = error.localizedDescription }
-        }
-    }
-
-    private func currentFitnessChallengeValue(metric: String) -> Double? {
-        guard let today = fitnessSnapshot.today else { return nil }
-        switch metric {
-        case "steps": return today.steps.map(Double.init)
-        case "distance_m": return today.distanceMeters
-        case "exercise_minutes": return today.exerciseMinutes
-        case "workouts": return today.workouts.map(Double.init)
-        case "active_energy_kcal": return today.activeEnergyKcal
-        case "weight_checkins": return today.weightKilograms.map { _ in 1.0 }
-        default: return nil
-        }
-    }
-
-    private func friendlyFitnessError(_ error: Error) -> String {
-        let status = (error as? SpudLinkAPIError)?.statusCode
-        let message = error.localizedDescription
-        if status == 409, message.localizedCaseInsensitiveContains("link little spud") {
-            return message
-        }
-        return status == 404 || status == 409
-            ? "Install and start Fitness Core from Tater Shop."
-            : message
-    }
-
-    private func startFitnessStateSync() {
-        fitnessStateSyncTask?.cancel()
-        guard let currentSession = session,
-              FitnessHealthStore.shared.coreAvailable(session: currentSession) else {
-            fitnessStateSyncTask = nil
-            return
-        }
-        fitnessStateSyncTask = Task { [weak self] in
-            var tick = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
-                guard let self, self.activeLane == .fitness, let currentSession = self.session else { break }
-                tick += 1
-                if tick.isMultiple(of: 20),
-                   self.fitnessHealthConnected,
-                   self.fitnessSnapshot.challenges.contains(where: { $0.state == "active" }) {
-                    self.syncFitnessFromHealth(showStatus: false)
-                    continue
-                }
-                do {
-                    self.fitnessSnapshot = try await self.api.fetchFitness(session: currentSession, refresh: true)
-                    FitnessHealthStore.shared.setCoreAvailable(true, session: currentSession)
-                    self.fitnessCoreAvailable = true
-                    self.fitnessError = ""
-                } catch {
-                    guard !Task.isCancelled else { break }
-                    if FitnessHealthStore.isCoreUnavailable(error) {
-                        FitnessHealthStore.shared.setCoreAvailable(false, session: currentSession)
-                        self.fitnessCoreAvailable = false
-                        self.fitnessError = self.friendlyFitnessError(error)
-                        break
-                    }
-                }
-            }
         }
     }
 
